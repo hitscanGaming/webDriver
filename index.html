@@ -110,7 +110,8 @@
         // -----------------------------------------------------------------------------
 
         const REPORT_ID = 6;
-        const REPORT_SIZE = 30; // 1 byte ID + 29 bytes Payload
+        const REPORT_USER_CONFIG_SIZE = 13;
+        const REPORT_SIZE = 1 + REPORT_USER_CONFIG_SIZE; // 1 byte ID + 29 bytes Payload
         const VENDOR_ID = 0x1915; // Target Vendor ID
 
         const ConfigStatus = {
@@ -229,7 +230,7 @@
             async exchangeFeatureReport(recipient, eventId, status, data = null) {
                 if (!this.device || !this.device.opened) throw new Error('Device not connected');
 
-                const buffer = new Uint8Array(29);
+                const buffer = new Uint8Array(REPORT_USER_CONFIG_SIZE);
                 buffer[0] = recipient;
                 buffer[1] = eventId;
                 buffer[2] = status;
@@ -260,12 +261,17 @@
                     try {
                         const view = await this.device.receiveFeatureReport(REPORT_ID);
 
+                        // --- DEBUG: Print Raw Data ---
+                        if (view && view.buffer) {
+                             console.log(`[HID] RAW DATA: ${this.toHexString(view.buffer)}`);
+                        }
+
                         if (!view || !(view instanceof DataView)) continue;
 
                         // HANDLE OFFSET: Check if the first byte is the Report ID (6)
                         // This fixes the "Mismatch: Expected 0/6, Got 6/0" error.
                         let offset = 0;
-                        if (view.byteLength === 30 && view.getUint8(0) === REPORT_ID) {
+                        if (view.byteLength === REPORT_SIZE && view.getUint8(0) === REPORT_ID) {
                             offset = 1;
                         }
 
@@ -605,14 +611,17 @@
 
             // --- Real Hardware Interaction Logic ---
 
-            const handleDpiChange = async (id, newValue) => {
+            // Only updates the UI state (Optimistic)
+            const handleDpiChange = (id, newValue) => {
                 const val = Math.min(26000, Math.max(50, parseInt(newValue) || 50));
-
-                // 1. Update React State (Optimistic UI)
                 const updatedDpis = dpis.map(d => d.id === id ? { ...d, value: val } : d);
                 updateConfig('dpis', updatedDpis);
+            };
 
-                // 2. Send to Device
+            // Sends the command to the device (Commit)
+            const handleDpiCommit = async (id, newValue) => {
+                const val = Math.min(26000, Math.max(50, parseInt(newValue) || 50));
+                console.log(`[HID] Committing DPI ${id}: ${val}`);
                 try {
                     await WebHIDService.setConfig('motion', `cpi_stage_${id}`, val);
                     const activeDpi = dpis.find(d => d.active);
@@ -699,6 +708,8 @@
                                         step="50"
                                         value={dpi.value}
                                         onChange={(e) => handleDpiChange(dpi.id, e.target.value)}
+                                        onMouseUp={(e) => handleDpiCommit(dpi.id, e.target.value)}
+                                        onTouchEnd={(e) => handleDpiCommit(dpi.id, e.target.value)}
                                         className="w-full h-[3px] bg-gray-700 rounded-lg appearance-none cursor-pointer outline-none"
                                     />
                                     <span className="absolute left-0 top-5 text-[10px] text-gray-600">50</span>
@@ -713,6 +724,13 @@
                                     step="50"
                                     value={dpi.value}
                                     onChange={(e) => handleDpiChange(dpi.id, e.target.value)}
+                                    onBlur={(e) => handleDpiCommit(dpi.id, e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                            handleDpiCommit(dpi.id, e.currentTarget.value);
+                                            e.currentTarget.blur();
+                                        }
+                                    }}
                                     className="bg-inputDark border border-gray-700 text-gray-200 text-xs rounded px-2 py-1.5 w-16 text-center focus:outline-none focus:border-gray-500 font-mono"
                                 />
                             </div>
