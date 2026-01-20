@@ -196,14 +196,25 @@
                 this.device = devices[0];
                 if (!this.device.opened) await this.device.open();
 
-                console.log(`[HID] Connected to ${this.device.productName}`);
-                return this.device;
+                console.log(`[HID] Connected to ${this.device.productName} (PID: 0x${this.device.productId.toString(16)})`);
+
+                // Determine if Dongle based on PID range (0xF***)
+                // Mouse is 0xE***, Dongle is 0xF***
+                const isDongle = (this.device.productId & 0xF000) === 0xF000;
+                console.log(`[HID] Device Type: ${isDongle ? 'Wireless Dongle' : 'Wired Mouse'}`);
+
+                return { device: this.device, isDongle };
             },
 
             // Check for already paired devices (for polling)
             async checkConnection() {
                 if (!navigator.hid) return null;
-                if (this.device && this.device.opened) return this.device;
+                if (this.device && this.device.opened) {
+                    return {
+                        device: this.device,
+                        isDongle: (this.device.productId & 0xF000) === 0xF000
+                    };
+                }
 
                 const devices = await navigator.hid.getDevices();
                 const pairedDevice = devices.find(d => d.vendorId === VENDOR_ID);
@@ -212,8 +223,9 @@
                     try {
                         if (!pairedDevice.opened) await pairedDevice.open();
                         this.device = pairedDevice;
-                        console.log(`[HID] Reconnected to ${pairedDevice.productName}`);
-                        return this.device;
+                        console.log(`[HID] Reconnected to ${pairedDevice.productName} (PID: 0x${pairedDevice.productId.toString(16)})`);
+                        const isDongle = (pairedDevice.productId & 0xF000) === 0xF000;
+                        return { device: this.device, isDongle };
                     } catch (e) {
                         console.warn(`[HID] Failed to open paired device: ${e.message}`);
                     }
@@ -816,6 +828,7 @@
 
             // WebHID State
             const [device, setDevice] = useState(null);
+            const [isDongle, setIsDongle] = useState(false);
             const [statusMessage, setStatusMessage] = useState('Mouse not connected.');
             const [isSyncing, setIsSyncing] = useState(false);
             const [batteryLevel, setBatteryLevel] = useState(null); // Initialize as null or 100
@@ -948,7 +961,8 @@
 
                 if (connectedDevice) {
                     if (!device) {
-                        setDevice(connectedDevice);
+                        setDevice(connectedDevice.device);
+                        setIsDongle(connectedDevice.isDongle);
                         // If we auto-connect, we should also fetch settings
                         fetchSettings();
                     }
@@ -987,7 +1001,8 @@
                         console.log(`[App] Board Name: ${boardName}`);
                         console.log(`[App] HWID: ${hwid}`);
 
-                        setDevice(connectedDevice);
+                        setDevice(connectedDevice.device);
+                        setIsDongle(connectedDevice.isDongle);
                         await fetchSettings(); // Sync immediately after connect
                     }
                 } catch (e) {
@@ -1029,13 +1044,15 @@
                                     <div className="text-gray-500 text-lg text-white tracking-widest opacity-90">Hitscan Configurator</div>
                                 </div>
                                 <div className="flex items-center gap-5">
-                                    <button
-                                        onClick={handlePairing}
-                                        className="text-gray-400 hover:text-white cursor-pointer transition-colors p-1"
-                                        title="Pair Device"
-                                    >
-                                        <Icons.Wireless />
-                                    </button>
+                                    {isDongle && (
+                                        <button
+                                            onClick={handlePairing}
+                                            className="text-gray-400 hover:text-white cursor-pointer transition-colors p-1"
+                                            title="Pair Device"
+                                        >
+                                            <Icons.Wireless />
+                                        </button>
+                                    )}
                                     <div className="text-gray-400 hover:text-white cursor-pointer transition-colors"><Icons.Settings /></div>
                                     <div className="text-gray-400 hover:text-white cursor-pointer transition-colors"><Icons.Minus /></div>
                                     <div className="text-gray-400 hover:text-white cursor-pointer transition-colors"><Icons.X /></div>
