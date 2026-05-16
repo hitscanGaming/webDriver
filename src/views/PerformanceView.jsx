@@ -136,7 +136,7 @@ export const PerformanceView = ({ config, updateConfig, isDongle }) => {
                 <div className="bg-[#0b0b0b] border border-borderDark rounded-lg p-6 flex flex-col items-center justify-center gap-5 shadow-lg">
                     <span className="text-[#d4d4d4] text-xs font-bold tracking-wide">Polling Rate (Hz)</span>
                     <RadioGroup
-                        options={isDongle ? ['125', '250', '500', '1000', '2000', '4000', '8000'] : ['125', '250', '500', '1000']}
+                        options={isDongle ? ['125', '250', '500', '1000', '2000', '4000'] : ['125', '250', '500', '1000']}
                         selected={pollingRate}
                         onChange={handlePollingRate}
                     />

@@ -2,17 +2,9 @@ import React from 'react';
 import { Icons } from '../components/Icons';
 import { MouseSVG } from '../components/MouseSVG';
 import { ToggleSwitch, CustomSelect } from '../components/UI';
-import { WebHIDService } from '../services/WebHIDService';
 
 export const KeyConfigurationView = ({ config, updateConfig }) => {
     const { keyConfig: settings } = config;
-
-    const handleMotionSync = async (val) => {
-        updateConfig('motionSync', val);
-        try {
-            await WebHIDService.setConfig('motion', 'motion_sync', val ? 1 : 0);
-        } catch (e) { console.error("Motion Sync Error", e); }
-    };
 
     const keys = [
         { id: 1, label: 'Left Click' },
@@ -49,7 +41,7 @@ export const KeyConfigurationView = ({ config, updateConfig }) => {
             <div className="border-t border-borderDark bg-[#0d0d0d] px-8 pb-8 pt-0 flex gap-8">
                 <div className="flex-1 bg-panelDark rounded-lg p-5 grid grid-cols-[auto_1fr] gap-x-8 gap-y-4 items-center border border-borderDark shadow-lg">
                     <span className="text-gray-400 text-xs font-medium">Motion Sync</span>
-                    <div className="flex justify-end"><ToggleSwitch checked={settings.motionSync} onChange={handleMotionSync} /></div>
+                    <div className="flex justify-end"><ToggleSwitch checked={settings.motionSync} onChange={(v) => updateConfig('motionSync', v)} /></div>
 
                     <span className="text-gray-400 text-xs font-medium">Debounce Time</span>
                     <div className="flex justify-end w-full">

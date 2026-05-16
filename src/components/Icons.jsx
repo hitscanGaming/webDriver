@@ -10,15 +10,6 @@ export const Icons = {
     Upload: () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>,
     RotateCcw: () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 4v6h6" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></svg>,
     Usb: ({ isConnected }) => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={isConnected ? 'white' : 'currentColor'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={isConnected ? 'text-white' : 'text-gray-500'}><path d="M10 20v-4" /><path d="M14 10v4" /><path d="M18 10v4" /><path d="M6 10v4" /><circle cx="12" cy="12" r="3" /><path d="M12 7V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v3" /><path d="M12 17v3a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-3" /></svg>,
-    Wired: () => (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M2 12h6" />
-            <rect x="8" y="9" width="9" height="6" rx="1" />
-            <path d="M17 12h3" />
-            <path d="M11 7v-1" />
-            <path d="M14 7v-1" />
-        </svg>
-    ),
     Wireless: () => (
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="1.5" fill="currentColor" />

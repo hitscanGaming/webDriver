@@ -1,11 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { WebHIDService, ConnectionMode } from './services/WebHIDService';
-import { McubootImage } from './services/McubootImage';
+import { WebHIDService } from './services/WebHIDService';
 import { Icons } from './components/Icons';
 import { MainView } from './views/MainView';
 import { KeyConfigurationView } from './views/KeyConfigurationView';
 import { PerformanceView } from './views/PerformanceView';
-import { SettingsPanel } from './views/SettingsPanel';
 
 function App() {
     const [activeTab, setActiveTab] = useState('Main');
@@ -13,13 +11,10 @@ function App() {
 
     // WebHID State
     const [device, setDevice] = useState(null);
-    const [connectionMode, setConnectionMode] = useState(null);
+    const [isDongle, setIsDongle] = useState(false);
     const [statusMessage, setStatusMessage] = useState('Mouse not connected.');
-    const isDongle = connectionMode === ConnectionMode.WIRELESS;
     const [isSyncing, setIsSyncing] = useState(false);
     const [batteryLevel, setBatteryLevel] = useState(null);
-    const [showSettings, setShowSettings] = useState(false);
-    const [deviceInfo, setDeviceInfo] = useState({ boardName: null, hwid: null, fwVersion: null, bootloader: null });
 
     // Shared Configuration State 
     const [config, setConfig] = useState({
@@ -59,28 +54,6 @@ function App() {
         }));
     }, []);
 
-    // Pulls board name, HWID, firmware version, and bootloader variant.
-    // Called on every connect (manual + auto via HID events) so the Settings
-    // panel always sees fresh values. Serial — the HID feature-report
-    // transport is single-slot and parallel requests collide on the wire.
-    const fetchDeviceInfo = async () => {
-        try {
-            const boardName = await WebHIDService.getBoardName();
-            const hwid = await WebHIDService.getHWID();
-            const fwinfo = await WebHIDService.dfuFwInfo({ timeoutMs: 1500 });
-            const bootloader = await WebHIDService.dfuVariant({ timeoutMs: 1500 });
-            console.log("[App] device info:", { boardName, hwid, fwinfo, bootloader });
-            setDeviceInfo({
-                boardName,
-                hwid,
-                fwVersion: fwinfo ? McubootImage.formatVersion(fwinfo.version) : null,
-                bootloader: bootloader || null,
-            });
-        } catch (e) {
-            console.warn("[App] fetchDeviceInfo failed:", e);
-        }
-    };
-
     // Sync Logic
     const fetchSettings = async () => {
         console.log("[App] fetchSettings initiated.");
@@ -109,11 +82,9 @@ function App() {
             const lodVal = await fetchAndLog(MOD_MOTION, 'lod');
             const rippleVal = await fetchAndLog(MOD_MOTION, 'ripple_control');
             const snapVal = await fetchAndLog(MOD_MOTION, 'angle_snap');
-            const motionSyncVal = await fetchAndLog(MOD_MOTION, 'motion_sync');
 
             console.log("[App] Fetching Battery level...");
-            // Battery is non-critical — cap timeout so a stalled response doesn't hold up the rest of the sync.
-            const batLevel = await WebHIDService.getConfig('battery_meas', 'bat_level', { timeoutMs: 400 });
+            const batLevel = await WebHIDService.getConfig('battery_meas', 'bat_level');
             console.log("[App] batLevel:", batLevel);
             if (batLevel !== null) {
                 setBatteryLevel(batLevel);
@@ -134,10 +105,6 @@ function App() {
 
                 return {
                     ...prev,
-                    keyConfig: {
-                        ...prev.keyConfig,
-                        motionSync: motionSyncVal === 1
-                    },
                     performance: {
                         ...prev.performance,
                         dpis: newDpis,
@@ -165,41 +132,29 @@ function App() {
         const connectedDevice = await WebHIDService.checkConnection();
 
         if (connectedDevice) {
-            // Handle three transitions: first connect, swap to a higher-priority device,
-            // and no-op when nothing changed.
-            if (!device || device !== connectedDevice.device) {
+            if (!device) {
                 setDevice(connectedDevice.device);
-                setConnectionMode(connectedDevice.mode);
-                // Don't kick the 12-roundtrip settings sync while DFU owns the
-                // config-channel — the SettingsPanel verify step is polling
-                // dfuFwInfo on this same device and they'd race.
-                if (!WebHIDService.dfuInProgress) {
-                    fetchDeviceInfo();
-                    fetchSettings();
-                }
+                setIsDongle(connectedDevice.isDongle);
+                fetchSettings();
             }
-        } else if (device) {
-            setDevice(null);
-            setConnectionMode(null);
-            setStatusMessage('Mouse Disconnected.');
+        } else {
+            if (device) {
+                setDevice(null);
+                setStatusMessage('Mouse Disconnected.');
+            }
         }
     }, [device]);
 
     useEffect(() => {
         pollConnectionStatus();
         const intervalId = setInterval(pollConnectionStatus, 5000);
-        const removeListeners = WebHIDService.addEventListeners(pollConnectionStatus);
-        return () => {
-            clearInterval(intervalId);
-            removeListeners();
-        };
+        return () => clearInterval(intervalId);
     }, [pollConnectionStatus]);
 
     const connectMouse = async () => {
         if (device) {
             await WebHIDService.disconnect();
             setDevice(null);
-            setConnectionMode(null);
             setStatusMessage('Disconnected.');
             return;
         }
@@ -209,14 +164,19 @@ function App() {
         try {
             const connectedDevice = await WebHIDService.connect();
             if (connectedDevice) {
+                console.log("[App] Reading Device Info...");
+                const boardName = await WebHIDService.getBoardName();
+                const hwid = await WebHIDService.getHWID();
+
+                console.log(`[App] Board Name: ${boardName}`);
+                console.log(`[App] HWID: ${hwid}`);
+
                 setDevice(connectedDevice.device);
-                setConnectionMode(connectedDevice.mode);
-                await fetchDeviceInfo();
+                setIsDongle(connectedDevice.isDongle);
                 await fetchSettings();
             }
         } catch (e) {
             setDevice(null);
-            setConnectionMode(null);
             setStatusMessage(`Connection Error: ${e.message}`);
         } finally {
             WebHIDService.isConnecting = false;
@@ -259,14 +219,7 @@ function App() {
                                     <Icons.Wireless />
                                 </button>
                             )}
-                            <button
-                                onClick={() => setShowSettings(true)}
-                                disabled={!isConnected}
-                                className="text-gray-400 hover:text-white cursor-pointer transition-colors p-1 disabled:opacity-40 disabled:cursor-not-allowed"
-                                title="Settings"
-                            >
-                                <Icons.Settings />
-                            </button>
+                            <div className="text-gray-400 hover:text-white cursor-pointer transition-colors"><Icons.Settings /></div>
                             <div className="text-gray-400 hover:text-white cursor-pointer transition-colors"><Icons.Minus /></div>
                             <div className="text-gray-400 hover:text-white cursor-pointer transition-colors"><Icons.X /></div>
                         </div>
@@ -294,22 +247,6 @@ function App() {
                                 {isSyncing ? 'Syncing...' : statusMessage}
                             </span>
 
-                            {isConnected && connectionMode && (
-                                <span
-                                    className={`flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border [&_svg]:w-3 [&_svg]:h-3 ${
-                                        connectionMode === ConnectionMode.WIRED
-                                            ? 'border-statusInfo/40 text-statusInfo'
-                                            : 'border-statusSuccess/40 text-statusSuccess'
-                                    }`}
-                                    title={connectionMode === ConnectionMode.WIRED ? 'Connected directly via USB cable' : 'Connected via 2.4 GHz dongle'}
-                                >
-                                    {connectionMode === ConnectionMode.WIRED
-                                        ? <Icons.Wired />
-                                        : <Icons.Wireless />}
-                                    {connectionMode === ConnectionMode.WIRED ? 'Wired' : 'Wireless'}
-                                </span>
-                            )}
-
                             <button
                                 onClick={connectMouse}
                                 className={`text-black text-xs font-bold py-2 px-4 rounded transition-all shadow-md ${connectButtonClass}`}
@@ -332,14 +269,6 @@ function App() {
                 </div>
 
             </div>
-
-            <SettingsPanel
-                show={showSettings}
-                onClose={() => setShowSettings(false)}
-                deviceInfo={deviceInfo}
-                onDfuStart={() => { WebHIDService.dfuInProgress = true; }}
-                onDfuEnd={() => { WebHIDService.dfuInProgress = false; }}
-            />
         </div>
     );
 }
