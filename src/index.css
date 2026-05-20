@@ -2,38 +2,32 @@
 @tailwind components;
 @tailwind utilities;
 
-@layer base {
-  body {
-    background-color: #000;
-    color: white;
-  }
+body {
+  background-color: #000;
+  color: white;
 }
 
-@layer utilities {
-  /* Range slider thumb style */
-  input[type=range]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    height: 14px;
-    width: 14px;
-    border-radius: 50%;
-    background: #ffffff;
-    cursor: pointer;
-    margin-top: -5px;
-    box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
-  }
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 14px;
+  width: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  cursor: pointer;
+  margin-top: -5px;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
+}
 
-  input[type=range]::-webkit-slider-runnable-track {
-    width: 100%;
-    height: 4px;
-    cursor: pointer;
-    background: #333;
-    border-radius: 2px;
-  }
+input[type='range']::-webkit-slider-runnable-track {
+  width: 100%;
+  height: 4px;
+  cursor: pointer;
+  background: #333;
+  border-radius: 2px;
+}
 
-  /* Hide number input spinners */
-  input[type=number]::-webkit-inner-spin-button,
-  input[type=number]::-webkit-outer-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-  }
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
