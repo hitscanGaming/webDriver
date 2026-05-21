@@ -69,6 +69,14 @@ export const WebHIDService = {
   configMap: HARDCODED_CONFIG,
   isConnecting: false,
   lastStatus: ConfigStatus.SUCCESS,
+  _pending: Promise.resolve(),
+
+  _enqueue(fn) {
+    const run = () => fn();
+    const next = this._pending.then(run, run);
+    this._pending = next.catch(() => {});
+    return next;
+  },
 
   statusToMessage(code) {
     return STATUS_TO_MESSAGE[code] || `status ${code}`;
@@ -132,78 +140,80 @@ export const WebHIDService = {
     this.device = null;
   },
 
-  async exchangeFeatureReport(recipient, eventId, status, data = null) {
-    if (!this.device || !this.device.opened) throw new Error('Device not connected');
+  exchangeFeatureReport(recipient, eventId, status, data = null) {
+    return this._enqueue(async () => {
+      if (!this.device || !this.device.opened) throw new Error('Device not connected');
 
-    const buffer = new Uint8Array(REPORT_USER_CONFIG_SIZE);
-    buffer[0] = recipient;
-    buffer[1] = eventId;
-    buffer[2] = status;
-    buffer[3] = data ? data.byteLength : 0;
+      const buffer = new Uint8Array(REPORT_USER_CONFIG_SIZE);
+      buffer[0] = recipient;
+      buffer[1] = eventId;
+      buffer[2] = status;
+      buffer[3] = data ? data.byteLength : 0;
 
-    if (data) {
-      if (data.byteLength > 25) throw new Error('Data too long for HID report');
-      buffer.set(new Uint8Array(data), 4);
-    }
+      if (data) {
+        if (data.byteLength > 25) throw new Error('Data too long for HID report');
+        buffer.set(new Uint8Array(data), 4);
+      }
 
-    console.log(`[HID] Sending: ID=${REPORT_ID} event=${eventId} Payload=${this.toHexString(buffer)}`);
-
-    try {
-      await this.device.sendFeatureReport(REPORT_ID, buffer);
-    } catch (e) {
-      console.error('[HID] Send Error:', e);
-      this.lastStatus = ConfigStatus.DISCONNECTED;
-      throw e;
-    }
-
-    const MAX_RETRIES = 200;
-    for (let i = 0; i < MAX_RETRIES; i++) {
-      await new Promise((r) => setTimeout(r, 20));
+      console.log(`[HID] Sending: ID=${REPORT_ID} event=${eventId} Payload=${this.toHexString(buffer)}`);
 
       try {
-        const view = await this.device.receiveFeatureReport(REPORT_ID);
-
-        if (view && view.buffer) {
-          console.log(`[HID] RAW DATA: ${this.toHexString(view.buffer)}`);
-        }
-
-        if (!view || !(view instanceof DataView)) continue;
-
-        let offset = 0;
-        if (view.byteLength === REPORT_SIZE && view.getUint8(0) === REPORT_ID) {
-          offset = 1;
-        }
-
-        if (view.byteLength < 4 + offset) continue;
-
-        const r_rcpt = view.getUint8(0 + offset);
-        const r_evt = view.getUint8(1 + offset);
-        const r_stat = view.getUint8(2 + offset);
-        const r_len = view.getUint8(3 + offset);
-
-        if (r_stat !== ConfigStatus.PENDING || i % 20 === 0) {
-          console.log(`[HID] Poll ${i}: Rcpt=${r_rcpt}, Evt=${r_evt}, Stat=${r_stat} (Offset=${offset})`);
-        }
-
-        if (r_stat === ConfigStatus.PENDING) continue;
-
-        if (r_rcpt === recipient && r_evt === eventId) {
-          this.lastStatus = r_stat;
-          if (r_stat === ConfigStatus.SUCCESS) {
-            return new Uint8Array(view.buffer, view.byteOffset + 4 + offset, r_len);
-          }
-          console.warn(`[HID] Protocol error: ${this.statusToMessage(r_stat)} (code ${r_stat})`);
-          return null;
-        } else {
-          console.warn(`[HID] Mismatch: Expected ${recipient}/${eventId}, Got ${r_rcpt}/${r_evt}`);
-        }
+        await this.device.sendFeatureReport(REPORT_ID, buffer);
       } catch (e) {
-        // Ignore read errors during polling
+        console.error('[HID] Send Error:', e);
+        this.lastStatus = ConfigStatus.DISCONNECTED;
+        throw e;
       }
-    }
-    console.warn('[HID] Timeout waiting for response');
-    this.lastStatus = ConfigStatus.TIMEOUT;
-    return null;
+
+      const MAX_RETRIES = 200;
+      for (let i = 0; i < MAX_RETRIES; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+
+        try {
+          const view = await this.device.receiveFeatureReport(REPORT_ID);
+
+          if (view && view.buffer) {
+            console.log(`[HID] RAW DATA: ${this.toHexString(view.buffer)}`);
+          }
+
+          if (!view || !(view instanceof DataView)) continue;
+
+          let offset = 0;
+          if (view.byteLength === REPORT_SIZE && view.getUint8(0) === REPORT_ID) {
+            offset = 1;
+          }
+
+          if (view.byteLength < 4 + offset) continue;
+
+          const r_rcpt = view.getUint8(0 + offset);
+          const r_evt = view.getUint8(1 + offset);
+          const r_stat = view.getUint8(2 + offset);
+          const r_len = view.getUint8(3 + offset);
+
+          if (r_stat !== ConfigStatus.PENDING || i % 20 === 0) {
+            console.log(`[HID] Poll ${i}: Rcpt=${r_rcpt}, Evt=${r_evt}, Stat=${r_stat} (Offset=${offset})`);
+          }
+
+          if (r_stat === ConfigStatus.PENDING) continue;
+
+          if (r_rcpt === recipient && r_evt === eventId) {
+            this.lastStatus = r_stat;
+            if (r_stat === ConfigStatus.SUCCESS) {
+              return new Uint8Array(view.buffer, view.byteOffset + 4 + offset, r_len);
+            }
+            console.warn(`[HID] Protocol error: ${this.statusToMessage(r_stat)} (code ${r_stat})`);
+            return null;
+          } else {
+            console.warn(`[HID] Mismatch: Expected ${recipient}/${eventId}, Got ${r_rcpt}/${r_evt}`);
+          }
+        } catch (e) {
+          // Ignore read errors during polling
+        }
+      }
+      console.warn('[HID] Timeout waiting for response');
+      this.lastStatus = ConfigStatus.TIMEOUT;
+      return null;
+    });
   },
 
   async getBoardName() {
@@ -275,23 +285,25 @@ export const WebHIDService = {
     return !!resp;
   },
 
-  async startPairing() {
-    if (!this.device || !this.device.opened) throw new Error('Device not connected');
-    const buffer = new Uint8Array(REPORT_USER_CONFIG_SIZE);
-    buffer[0] = 1;
-    buffer[1] = 0;
-    buffer[2] = ConfigStatus.SET;
-    buffer[3] = 0;
+  startPairing() {
+    return this._enqueue(async () => {
+      if (!this.device || !this.device.opened) throw new Error('Device not connected');
+      const buffer = new Uint8Array(REPORT_USER_CONFIG_SIZE);
+      buffer[0] = 1;
+      buffer[1] = 0;
+      buffer[2] = ConfigStatus.SET;
+      buffer[3] = 0;
 
-    console.log(`[HID] Sending Pairing Request: ID=${REPORT_ID}`);
-    try {
-      await this.device.sendFeatureReport(REPORT_ID, buffer);
-      console.log('[HID] Pairing Request Sent');
-      return true;
-    } catch (e) {
-      console.error('[HID] Pairing Request Error:', e);
-      throw e;
-    }
+      console.log(`[HID] Sending Pairing Request: ID=${REPORT_ID}`);
+      try {
+        await this.device.sendFeatureReport(REPORT_ID, buffer);
+        console.log('[HID] Pairing Request Sent');
+        return true;
+      } catch (e) {
+        console.error('[HID] Pairing Request Error:', e);
+        throw e;
+      }
+    });
   },
 };
 

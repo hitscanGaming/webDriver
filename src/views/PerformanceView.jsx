@@ -120,7 +120,6 @@ export const PerformanceView = ({ config, updateConfig, onProtocolError }) => {
               onBlur={(e) => handleDpiCommit(dpi.id, e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
-                  handleDpiCommit(dpi.id, e.currentTarget.value);
                   e.currentTarget.blur();
                 }
               }}
