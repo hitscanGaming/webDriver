@@ -190,11 +190,16 @@ export const WebHIDService = {
           const r_stat = view.getUint8(2 + offset);
           const r_len = view.getUint8(3 + offset);
 
-          if (r_stat !== ConfigStatus.PENDING || i % 20 === 0) {
+          // Treat status==request_status (CH32V305 echoes the request on its
+          // USER_CONFIG_TX slot until the dongle pushes the actual response)
+          // identically to PENDING — keep polling until SUCCESS / failure.
+          const isEcho = r_stat === status;
+
+          if ((r_stat !== ConfigStatus.PENDING && !isEcho) || i % 20 === 0) {
             console.log(`[HID] Poll ${i}: Rcpt=${r_rcpt}, Evt=${r_evt}, Stat=${r_stat} (Offset=${offset})`);
           }
 
-          if (r_stat === ConfigStatus.PENDING) continue;
+          if (r_stat === ConfigStatus.PENDING || isEcho) continue;
 
           if (r_rcpt === recipient && r_evt === eventId) {
             this.lastStatus = r_stat;
