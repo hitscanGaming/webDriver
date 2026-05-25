@@ -1,19 +1,27 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Icons } from './components/Icons.jsx';
 import { MainView } from './views/MainView.jsx';
 import { KeyConfigurationView } from './views/KeyConfigurationView.jsx';
 import { PerformanceView } from './views/PerformanceView.jsx';
+import { FirmwareView } from './views/FirmwareView.jsx';
 import { WebHIDService, ConfigStatus, VENDOR_ID } from './services/WebHIDService.js';
+
+const BASE_TABS = ['Main', 'Key Configuration', 'Performance'];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('Main');
-  const tabs = ['Main', 'Key Configuration', 'Performance'];
-
   const [device, setDevice] = useState(null);
   const [isDongle, setIsDongle] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Mouse not connected.');
   const [isSyncing, setIsSyncing] = useState(false);
   const [batteryLevel, setBatteryLevel] = useState(null);
+  // Firmware tab + DFU only render when a wired mouse is attached AND its DFU
+  // module was discovered. Dongle (PID 0xF***) hides the tab entirely.
+  const isWiredMouse = !!device && !isDongle;
+  const tabs = useMemo(() => (isWiredMouse ? [...BASE_TABS, 'Firmware'] : BASE_TABS), [isWiredMouse]);
+  // Pause the 30 s battery poll while a DFU is in flight (concurrent FETCHes
+  // would race the DFU sync polling and starve chunks).
+  const [isUpdating, setIsUpdating] = useState(false);
 
   const [config, setConfig] = useState({
     keyConfig: {
@@ -170,6 +178,7 @@ export default function App() {
 
   useEffect(() => {
     if (!device) return;
+    if (isUpdating) return; // DFU owns the channel; skip battery polling
 
     const refreshBattery = async () => {
       if (document.visibilityState !== 'visible') return;
@@ -184,7 +193,16 @@ export default function App() {
 
     const intervalId = setInterval(refreshBattery, 30000);
     return () => clearInterval(intervalId);
-  }, [device, isSyncing]);
+  }, [device, isSyncing, isUpdating]);
+
+  // If the Firmware tab is active but the user unplugs the cable (or plugs the
+  // dongle, switching to wireless), bounce back to Main so we don't strand them
+  // on a tab that's about to disappear.
+  useEffect(() => {
+    if (activeTab === 'Firmware' && !isWiredMouse) {
+      setActiveTab('Main');
+    }
+  }, [activeTab, isWiredMouse]);
 
   const connectMouse = async () => {
     if (device) {
@@ -313,6 +331,12 @@ export default function App() {
               config={config}
               updateConfig={(k, v) => updatePerformanceConfig(k, v)}
               onProtocolError={handleProtocolError}
+            />
+          )}
+          {activeTab === 'Firmware' && isWiredMouse && (
+            <FirmwareView
+              onProtocolError={handleProtocolError}
+              onUpdatingChange={setIsUpdating}
             />
           )}
         </div>

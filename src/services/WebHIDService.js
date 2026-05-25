@@ -1,9 +1,24 @@
 // WebHID Service (Nordic HID Protocol Implementation)
 
 const REPORT_ID = 6;
-const REPORT_USER_CONFIG_SIZE = 13;
+// Matches firmware/mouse/configuration/common/hid_report_user_config.h. The
+// "common" header is shared by mouse and dongle builds, so both targets and
+// the CH32V305 SPI bridge are all framed at 29 bytes end-to-end.
+const REPORT_USER_CONFIG_SIZE = 29;
 const REPORT_SIZE = 1 + REPORT_USER_CONFIG_SIZE;
 export const VENDOR_ID = 0x1915;
+
+const OPT_MODULE_DESCR = 0;
+const END_OF_TRANSFER_CHAR = '\n';
+const OPT_NAME_MODULE_VARIANT = 'module_variant';
+const POLL_INTERVAL_DEFAULT_MS = 20;
+const POLL_RETRY_DEFAULT = 200;
+
+// event_id = (module_id << 4) | option_id; both 4-bit. Wire option id is 1-indexed
+// because 0 == MODULE_DESCR (discovery cursor). See memory project-config-channel-encoding.
+export function buildEventId(modId, optId) {
+  return ((modId & 0x0f) << 4) | (optId & 0x0f);
+}
 
 export const ConfigStatus = {
   PENDING: 0,
@@ -23,13 +38,36 @@ export const ConfigStatus = {
   FAULT: 99,
 };
 
+// HARDCODED_CONFIG mirrors the mouse's actual link order for the
+// `config_channel_modules` linker section, as observed in firmware built with
+// CONFIG_DESKTOP_CONFIG_CHANNEL_DFU_ENABLE=y. Enabling DFU added a marker that
+// the linker placed at offset 0, shifting battery_meas 0→1 and motion 1→2.
+// IDs are the fallback only — discoverDeviceConfig() runs on connect (wired
+// AND dongle) and replaces this map with runtime-discovered IDs. ble_bond is
+// not compiled on either target (DESKTOP_BT=n), so it's not listed.
+//
+// Wire option IDs are 1-indexed (firmware opt_id = wire - 1); 0 is reserved
+// for MODULE_DESCR (discovery cursor). After discovery the dfu key becomes
+// "dfu/B0" via the bootloader variant suffix; findDfuModule resolves it.
 const HARDCODED_CONFIG = {
-  battery_meas: {
+  dfu: {
     id: 0,
+    options: {
+      start: 1,
+      data: 2,
+      sync: 3,
+      reboot: 4,
+      fwinfo: 5,
+      module_variant: 6,
+      devinfo: 7,
+    },
+  },
+  battery_meas: {
+    id: 1,
     options: { bat_level: 1 },
   },
   'motion/paw3395': {
-    id: 1,
+    id: 2,
     options: {
       module_variant: 1,
       cpi: 2,
@@ -48,10 +86,6 @@ const HARDCODED_CONFIG = {
       lod: 15,
     },
   },
-  ble_bond: {
-    id: 2,
-    options: { peer_erase: 1, peer_search: 2 },
-  },
 };
 
 const STATUS_TO_MESSAGE = {
@@ -69,6 +103,13 @@ export const WebHIDService = {
   configMap: HARDCODED_CONFIG,
   isConnecting: false,
   lastStatus: ConfigStatus.SUCCESS,
+  // Serialization mutex. WebHID's receiveFeatureReport returns whatever response
+  // is in the device's shared feature-report buffer — if two callers issue
+  // exchangeFeatureReport concurrently, the second's response can land while
+  // the first is still polling, causing the first to see a Mismatch and the
+  // second to time out. _enqueue funnels every exchange so each one fully
+  // completes (send + poll-until-non-PENDING + return) before the next starts.
+  // See memory: project-webhid-concurrent-exchange-race.
   _pending: Promise.resolve(),
 
   _enqueue(fn) {
@@ -106,7 +147,41 @@ export const WebHIDService = {
     const isDongle = (this.device.productId & 0xf000) === 0xf000;
     console.log(`[HID] Device Type: ${isDongle ? 'Wireless Dongle' : 'Wired Mouse'}`);
 
+    // Discovery walks MODULE_DESCR to learn current mouse-side module IDs.
+    // Run on dongle handles too: requests forwarded over ESB target the
+    // mouse's link order, which is what discovery enumerates. Skipping on
+    // dongle left HARDCODED IDs addressing wrong modules after DFU enabled.
+    await this._discoverAndAssignConfig();
+
     return { device: this.device, isDongle };
+  },
+
+  async _discoverAndAssignConfig() {
+    try {
+      const discovered = await this.discoverDeviceConfig();
+      if (discovered && Object.keys(discovered).length > 0) {
+        // Trust discovered module IDs (link order may have shifted when DFU
+        // was enabled) but prefer hardcoded option tables where they exist —
+        // the JS callers use JS-friendly aliases (e.g. `cpi_stage_active`)
+        // that don't match the firmware's wire strings (`cpi_stage`).
+        // Option IDs within a module are stable per source-order, so the
+        // hardcoded numbers stay correct.
+        const merged = {};
+        for (const [name, mod] of Object.entries(discovered)) {
+          merged[name] = {
+            id: mod.id,
+            options: HARDCODED_CONFIG[name]?.options ?? mod.options,
+          };
+        }
+        this.configMap = merged;
+        console.log(`[HID] Discovered modules: ${Object.keys(merged).join(', ')}`);
+        return;
+      }
+      console.warn('[HID] Discovery returned empty; falling back to HARDCODED_CONFIG');
+    } catch (e) {
+      console.warn(`[HID] Discovery error: ${e.message}; falling back to HARDCODED_CONFIG`);
+    }
+    this.configMap = HARDCODED_CONFIG;
   },
 
   async checkConnection() {
@@ -127,6 +202,7 @@ export const WebHIDService = {
         this.device = pairedDevice;
         console.log(`[HID] Reconnected to ${pairedDevice.productName} (PID: 0x${pairedDevice.productId.toString(16)})`);
         const isDongle = (pairedDevice.productId & 0xf000) === 0xf000;
+        await this._discoverAndAssignConfig();
         return { device: this.device, isDongle };
       } catch (e) {
         console.warn(`[HID] Failed to open paired device: ${e.message}`);
@@ -140,9 +216,17 @@ export const WebHIDService = {
     this.device = null;
   },
 
-  exchangeFeatureReport(recipient, eventId, status, data = null) {
+  exchangeFeatureReport(recipient, eventId, status, data = null, opts = {}) {
     return this._enqueue(async () => {
       if (!this.device || !this.device.opened) throw new Error('Device not connected');
+
+      const pollIntervalMs = opts.pollIntervalMs ?? POLL_INTERVAL_DEFAULT_MS;
+      const maxRetries = opts.maxRetries ?? POLL_RETRY_DEFAULT;
+      const verbose = opts.verbose ?? true;
+      // Caller (DFUService) passes a worker-driven sleeper so long-running
+      // transfers survive background-tab throttling. Default = setTimeout
+      // for the common config-channel path that always runs foregrounded.
+      const sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
 
       const buffer = new Uint8Array(REPORT_USER_CONFIG_SIZE);
       buffer[0] = recipient;
@@ -151,11 +235,13 @@ export const WebHIDService = {
       buffer[3] = data ? data.byteLength : 0;
 
       if (data) {
-        if (data.byteLength > 25) throw new Error('Data too long for HID report');
+        if (data.byteLength > REPORT_USER_CONFIG_SIZE - 4) throw new Error('Data too long for HID report');
         buffer.set(new Uint8Array(data), 4);
       }
 
-      console.log(`[HID] Sending: ID=${REPORT_ID} event=${eventId} Payload=${this.toHexString(buffer)}`);
+      if (verbose) {
+        console.log(`[HID] Sending: ID=${REPORT_ID} event=${eventId} Payload=${this.toHexString(buffer)}`);
+      }
 
       try {
         await this.device.sendFeatureReport(REPORT_ID, buffer);
@@ -165,14 +251,13 @@ export const WebHIDService = {
         throw e;
       }
 
-      const MAX_RETRIES = 200;
-      for (let i = 0; i < MAX_RETRIES; i++) {
-        await new Promise((r) => setTimeout(r, 20));
+      for (let i = 0; i < maxRetries; i++) {
+        await sleep(pollIntervalMs);
 
         try {
           const view = await this.device.receiveFeatureReport(REPORT_ID);
 
-          if (view && view.buffer) {
+          if (verbose && view && view.buffer) {
             console.log(`[HID] RAW DATA: ${this.toHexString(view.buffer)}`);
           }
 
@@ -195,7 +280,7 @@ export const WebHIDService = {
           // identically to PENDING — keep polling until SUCCESS / failure.
           const isEcho = r_stat === status;
 
-          if ((r_stat !== ConfigStatus.PENDING && !isEcho) || i % 20 === 0) {
+          if (verbose && ((r_stat !== ConfigStatus.PENDING && !isEcho) || i % 20 === 0)) {
             console.log(`[HID] Poll ${i}: Rcpt=${r_rcpt}, Evt=${r_evt}, Stat=${r_stat} (Offset=${offset})`);
           }
 
@@ -288,6 +373,78 @@ export const WebHIDService = {
 
     const resp = await this.exchangeFeatureReport(0, eventId, ConfigStatus.SET, data);
     return !!resp;
+  },
+
+  async readMaxModId() {
+    const result = await this.exchangeFeatureReport(0, 0, ConfigStatus.GET_MAX_MOD_ID, null, { verbose: false });
+    if (!result || result.byteLength < 1) return null;
+    return result[0];
+  },
+
+  async _fetchOptionDescr(modId) {
+    const eventId = buildEventId(modId, OPT_MODULE_DESCR);
+    const result = await this.exchangeFeatureReport(0, eventId, ConfigStatus.FETCH, null, { verbose: false });
+    if (!result) return null;
+    return new TextDecoder('utf-8', { fatal: false }).decode(result).replace(/\0/g, '');
+  },
+
+  // Walk the rotating MODULE_DESCR cursor for one module. Returns
+  // { id, name, options: { name: id } } or null on failure.
+  // Mirrors NrfHidDevice._discover_module_config (NCS hid_configurator).
+  async discoverModule(modId) {
+    const fetched = [];
+    let endIdx = -1;
+    // Hard cap = 16 options + module name + EoT sentinel; one extra round trip for safety.
+    for (let i = 0; i < 18; i++) {
+      const opt = await this._fetchOptionDescr(modId);
+      if (opt == null) return null;
+      if (fetched.includes(opt)) break;
+      if (opt[0] === END_OF_TRANSFER_CHAR) endIdx = fetched.length;
+      fetched.push(opt);
+    }
+    if (endIdx < 0) return null;
+    // Rotate so EoT comes first, drop it.
+    const rotated = fetched.slice(endIdx).concat(fetched.slice(0, endIdx)).slice(1);
+    if (rotated.length < 1) return null;
+    const name = rotated[0];
+    const options = {};
+    rotated.slice(1).forEach((n, i) => { options[n] = i + 1; });
+
+    let finalName = name;
+    if (OPT_NAME_MODULE_VARIANT in options) {
+      const variantEventId = buildEventId(modId, options[OPT_NAME_MODULE_VARIANT]);
+      const variantResult = await this.exchangeFeatureReport(0, variantEventId, ConfigStatus.FETCH, null, { verbose: false });
+      if (variantResult) {
+        const variant = new TextDecoder('utf-8', { fatal: false }).decode(variantResult).replace(/\0/g, '');
+        finalName = `${name}/${variant}`;
+      }
+    }
+    return { id: modId, name: finalName, options };
+  },
+
+  async discoverDeviceConfig() {
+    const maxId = await this.readMaxModId();
+    if (maxId == null) return null;
+    const config = {};
+    for (let i = 0; i <= maxId; i++) {
+      const mod = await this.discoverModule(i);
+      if (mod == null) {
+        console.warn(`[HID] discoverModule(${i}) failed`);
+        return null;
+      }
+      config[mod.name] = { id: mod.id, options: mod.options };
+    }
+    return config;
+  },
+
+  // Find the dfu module in configMap, tolerating the variant suffix
+  // ("dfu/B0", "dfu/MCUBOOT", ...). Returns { name, id, options } or null —
+  // shape matches what DFUService callers (fwinfo, dfuTransfer) expect.
+  findDfuModule() {
+    const key = Object.keys(this.configMap).find((k) => k === 'dfu' || k.startsWith('dfu/'));
+    if (!key) return null;
+    const mod = this.configMap[key];
+    return { name: key, id: mod.id, options: mod.options };
   },
 
   startPairing() {
