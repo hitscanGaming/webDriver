@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Icons } from './components/Icons.jsx';
 import { MainView } from './views/MainView.jsx';
 import { KeyConfigurationView } from './views/KeyConfigurationView.jsx';
@@ -22,6 +22,12 @@ export default function App() {
   // Pause the 30 s battery poll while a DFU is in flight (concurrent FETCHes
   // would race the DFU sync polling and starve chunks).
   const [isUpdating, setIsUpdating] = useState(false);
+  // React 18 StrictMode invokes the mount useEffect twice in dev. Both calls
+  // race past the `!device` check (state batching hides the setDevice from the
+  // second closure), then both kick off fetchSettings -- doubling the 11
+  // serial FETCHes through the _enqueue mutex. A ref is the right tool here
+  // because we need a synchronous flag visible between the two effect runs.
+  const syncInFlightRef = useRef(false);
 
   const [config, setConfig] = useState({
     keyConfig: {
@@ -142,11 +148,17 @@ export default function App() {
 
   const syncFromAttachedDevice = useCallback(async () => {
     if (WebHIDService.isConnecting) return;
-    const connectedDevice = await WebHIDService.checkConnection();
-    if (connectedDevice && !device) {
-      setDevice(connectedDevice.device);
-      setIsDongle(connectedDevice.isDongle);
-      fetchSettings();
+    if (syncInFlightRef.current) return;
+    syncInFlightRef.current = true;
+    try {
+      const connectedDevice = await WebHIDService.checkConnection();
+      if (connectedDevice && !device) {
+        setDevice(connectedDevice.device);
+        setIsDongle(connectedDevice.isDongle);
+        await fetchSettings();
+      }
+    } finally {
+      syncInFlightRef.current = false;
     }
   }, [device]);
 

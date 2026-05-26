@@ -102,6 +102,14 @@ export const WebHIDService = {
   device: null,
   configMap: HARDCODED_CONFIG,
   isConnecting: false,
+  // Shared in-flight promise for checkConnection(). React 18 StrictMode
+  // double-mounts useEffect in dev, calling syncFromAttachedDevice twice in
+  // quick succession; without this, both invocations sail past the
+  // "already opened" early-return (this.device is still null), both call
+  // pairedDevice.open() (one fails with "operation in progress"), and both
+  // call _discoverAndAssignConfig() -- two parallel walkers fight over the
+  // firmware's single MODULE_DESCR cursor and discovery bails.
+  _checkConnectionInFlight: null,
   lastStatus: ConfigStatus.SUCCESS,
   // Serialization mutex. WebHID's receiveFeatureReport returns whatever response
   // is in the device's shared feature-report buffer — if two callers issue
@@ -156,35 +164,29 @@ export const WebHIDService = {
     return { device: this.device, isDongle };
   },
 
-  async _discoverAndAssignConfig() {
-    try {
-      const discovered = await this.discoverDeviceConfig();
-      if (discovered && Object.keys(discovered).length > 0) {
-        // Trust discovered module IDs (link order may have shifted when DFU
-        // was enabled) but prefer hardcoded option tables where they exist —
-        // the JS callers use JS-friendly aliases (e.g. `cpi_stage_active`)
-        // that don't match the firmware's wire strings (`cpi_stage`).
-        // Option IDs within a module are stable per source-order, so the
-        // hardcoded numbers stay correct.
-        const merged = {};
-        for (const [name, mod] of Object.entries(discovered)) {
-          merged[name] = {
-            id: mod.id,
-            options: HARDCODED_CONFIG[name]?.options ?? mod.options,
-          };
-        }
-        this.configMap = merged;
-        console.log(`[HID] Discovered modules: ${Object.keys(merged).join(', ')}`);
-        return;
-      }
-      console.warn('[HID] Discovery returned empty; falling back to HARDCODED_CONFIG');
-    } catch (e) {
-      console.warn(`[HID] Discovery error: ${e.message}; falling back to HARDCODED_CONFIG`);
-    }
+  _discoverAndAssignConfig() {
+    // Runtime discovery costs ~3 s on the wireless path (~30 FETCH MODULE_DESCR
+    // round-trips, each ~100 ms gated by the mouse's 100 ms ESB keepalive
+    // window that carries the reverse-config piggyback). HARDCODED_CONFIG is
+    // accurate today; when firmware link order changes, regenerate it via
+    // `scripts/hid_dump_ids.ps1` (wired-mouse only -- the CH32V305 bridge
+    // doesn't honor HidD_GetFeature yet) which prints a paste-ready block.
+    // The discoverDeviceConfig() helpers below remain in place for diagnostic
+    // use and a future caching layer keyed by HWID + firmware version.
     this.configMap = HARDCODED_CONFIG;
   },
 
   async checkConnection() {
+    if (this._checkConnectionInFlight) {
+      return this._checkConnectionInFlight;
+    }
+    this._checkConnectionInFlight = this._checkConnection().finally(() => {
+      this._checkConnectionInFlight = null;
+    });
+    return this._checkConnectionInFlight;
+  },
+
+  async _checkConnection() {
     if (!navigator.hid) return null;
     if (this.device && this.device.opened) {
       return {
