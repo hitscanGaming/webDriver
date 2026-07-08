@@ -39,35 +39,23 @@ export const ConfigStatus = {
 };
 
 // HARDCODED_CONFIG mirrors the mouse's actual link order for the
-// `config_channel_modules` linker section, as observed in firmware built with
-// CONFIG_DESKTOP_CONFIG_CHANNEL_DFU_ENABLE=y. Enabling DFU added a marker that
-// the linker placed at offset 0, shifting battery_meas 0→1 and motion 1→2.
-// IDs are the fallback only — discoverDeviceConfig() runs on connect (wired
-// AND dongle) and replaces this map with runtime-discovered IDs. ble_bond is
-// not compiled on either target (DESKTOP_BT=n), so it's not listed.
+// `config_channel_modules` linker section. Order is alphabetical by object
+// filename within each CMake target's PRIVATE sources, so hw_interface (with
+// battery_meas.c then motion_sensor.c) lands before modules/dfu.c. Regenerate
+// via `.\scripts\hid_dump_ids.ps1 -Format js` after any source-add/reorder.
+// ble_bond is not compiled on either target (DESKTOP_BT=n), so it's not
+// listed. After discovery the dfu key becomes "dfu/B0" via the bootloader
+// variant suffix; findDfuModule resolves it.
 //
 // Wire option IDs are 1-indexed (firmware opt_id = wire - 1); 0 is reserved
-// for MODULE_DESCR (discovery cursor). After discovery the dfu key becomes
-// "dfu/B0" via the bootloader variant suffix; findDfuModule resolves it.
+// for MODULE_DESCR (discovery cursor).
 const HARDCODED_CONFIG = {
-  dfu: {
-    id: 0,
-    options: {
-      start: 1,
-      data: 2,
-      sync: 3,
-      reboot: 4,
-      fwinfo: 5,
-      module_variant: 6,
-      devinfo: 7,
-    },
-  },
   battery_meas: {
-    id: 1,
+    id: 0,
     options: { bat_level: 1 },
   },
   'motion/paw3395': {
-    id: 2,
+    id: 1,
     options: {
       module_variant: 1,
       cpi: 2,
@@ -84,6 +72,18 @@ const HARDCODED_CONFIG = {
       ripple_control: 13,
       angle_snap: 14,
       lod: 15,
+    },
+  },
+  dfu: {
+    id: 2,
+    options: {
+      start: 1,
+      data: 2,
+      sync: 3,
+      reboot: 4,
+      fwinfo: 5,
+      module_variant: 6,
+      devinfo: 7,
     },
   },
 };
