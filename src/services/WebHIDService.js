@@ -38,11 +38,13 @@ export const ConfigStatus = {
   FAULT: 99,
 };
 
-// HARDCODED_CONFIG mirrors the mouse's actual link order for the
-// `config_channel_modules` linker section. Order is alphabetical by object
-// filename within each CMake target's PRIVATE sources, so hw_interface (with
-// battery_meas.c then motion_sensor.c) lands before modules/dfu.c. Regenerate
-// via `.\scripts\hid_dump_ids.ps1 -Format js` after any source-add/reorder.
+// HARDCODED_CONFIG mirrors the mouse's `config_channel_modules` linker
+// section. Since issue #89, module IDs are deterministic: each module's
+// marker lives in a named subsection (config_channel_modules.<mod_name>)
+// and nrf_desktop.ld SORTs them, so IDs are ALPHABETICAL BY MODULE NAME
+// (battery_meas < dfu < motion) on every build config — LTO and CMake
+// order no longer matter. Regenerate via `.\scripts\hid_dump_ids.ps1
+// -Format js` after adding/removing a config-channel module.
 // ble_bond is not compiled on either target (DESKTOP_BT=n), so it's not
 // listed. After discovery the dfu key becomes "dfu/B0" via the bootloader
 // variant suffix; findDfuModule resolves it.
@@ -54,8 +56,20 @@ const HARDCODED_CONFIG = {
     id: 0,
     options: { bat_level: 1 },
   },
-  'motion/paw3395': {
+  dfu: {
     id: 1,
+    options: {
+      start: 1,
+      data: 2,
+      sync: 3,
+      reboot: 4,
+      fwinfo: 5,
+      module_variant: 6,
+      devinfo: 7,
+    },
+  },
+  'motion/paw3395': {
+    id: 2,
     options: {
       module_variant: 1,
       cpi: 2,
@@ -72,18 +86,6 @@ const HARDCODED_CONFIG = {
       ripple_control: 13,
       angle_snap: 14,
       lod: 15,
-    },
-  },
-  dfu: {
-    id: 2,
-    options: {
-      start: 1,
-      data: 2,
-      sync: 3,
-      reboot: 4,
-      fwinfo: 5,
-      module_variant: 6,
-      devinfo: 7,
     },
   },
 };
