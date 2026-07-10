@@ -81,11 +81,17 @@ const HARDCODED_CONFIG = {
       cpi_stage_3: 8,
       cpi_stage_4: 9,
       cpi_stage_active: 10,
-      poll_esb: 11,
-      poll_usb: 12,
-      ripple_control: 13,
-      angle_snap: 14,
-      lod: 15,
+      ripple_control: 11,
+      angle_snap: 12,
+      lod: 13,
+    },
+  },
+  polling: {
+    id: 3,
+    options: {
+      module_variant: 1,
+      poll_esb: 2,
+      poll_usb: 3,
     },
   },
 };

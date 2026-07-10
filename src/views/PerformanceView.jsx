@@ -53,9 +53,9 @@ export const PerformanceView = ({ config, updateConfig, onProtocolError }) => {
   const handlePollingRate = async (rate) => {
     updateConfig('pollingRate', rate);
     const val = parseInt(rate);
-    const ok = await commitSet(`Polling rate (ESB)`, 'motion', 'poll_esb', val);
+    const ok = await commitSet(`Polling rate (ESB)`, 'polling', 'poll_esb', val);
     if (!ok) return;
-    await commitSet(`Polling rate (USB)`, 'motion', 'poll_usb', val);
+    await commitSet(`Polling rate (USB)`, 'polling', 'poll_usb', val);
   };
 
   const handleLOD = async (valStr) => {

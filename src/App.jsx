@@ -92,7 +92,7 @@ export default function App() {
       await fetchAndLog(MOD_MOTION, 'cpi');
 
       console.log('[App] Fetching Performance settings...');
-      const pollRate = await fetchAndLog(MOD_MOTION, 'poll_esb');
+      const pollRate = await fetchAndLog('polling', 'poll_esb');
       const lodVal = await fetchAndLog(MOD_MOTION, 'lod');
       const rippleVal = await fetchAndLog(MOD_MOTION, 'ripple_control');
       const snapVal = await fetchAndLog(MOD_MOTION, 'angle_snap');
