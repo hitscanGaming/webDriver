@@ -61,6 +61,12 @@ const HARDCODED_CONFIG = {
     options: {
       module_variant: 1,
       debounce_ms: 2,
+      keymap_btn_1: 3,
+      keymap_btn_2: 4,
+      keymap_btn_3: 5,
+      keymap_btn_4: 6,
+      keymap_btn_5: 7,
+      keymap_btn_6: 8,
     },
   },
   dfu: {

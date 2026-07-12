@@ -54,12 +54,42 @@ export const KeyConfigurationView = ({ config, updateConfig, onProtocolError }) 
     await commitSet('Sleep Time', 'power_cfg', 'sleep_time', SLEEP_TIME_TO_SEC[label] ?? 60);
   };
 
+  // Assignable actions -> firmware wire codes (byte per key).
+  const ACTIONS = [
+    { label: 'Left Click', code: 1 },
+    { label: 'Right Click', code: 2 },
+    { label: 'Middle Click', code: 3 },
+    { label: 'Back', code: 4 },
+    { label: 'Forward', code: 5 },
+    { label: 'DPI Loop', code: 9 },
+    { label: 'Disabled', code: 0 },
+  ];
+  const actionOptions = ACTIONS.map((a) => a.label);
+  const actionLabel = (code) => ACTIONS.find((a) => a.code === code)?.label ?? `Action ${code}`;
+  const codeFromLabel = (label) => ACTIONS.find((a) => a.label === label)?.code ?? -1;
+
+  const handleKeymap = async (btnIdx, label) => {
+    const code = codeFromLabel(label);
+    if (code < 0) return;
+    const newKeymap = [...settings.keymap];
+    newKeymap[btnIdx] = code;
+    // At least one button must remain mapped to Left Click (code 1).
+    if (!newKeymap.includes(1)) {
+      alert('At least one button must be mapped to Left Click.');
+      return;
+    }
+    updateConfig('keymap', newKeymap);
+    await commitSet(`Keymap btn ${btnIdx + 1}`, 'buttons_cfg', `keymap_btn_${btnIdx + 1}`, code);
+  };
+
+  // Physical button positions 1..6. All are remappable; labels are the
+  // default function at each position.
   const keys = [
     { id: 1, label: 'Left Click' },
     { id: 2, label: 'Right Click' },
     { id: 3, label: 'Middle Click' },
-    { id: 4, label: 'Forward' },
-    { id: 5, label: 'Back' },
+    { id: 4, label: 'Back' },
+    { id: 5, label: 'Forward' },
     { id: 6, label: 'DPI Loop' },
   ];
 
@@ -67,14 +97,19 @@ export const KeyConfigurationView = ({ config, updateConfig, onProtocolError }) 
     <div className="flex flex-col h-full animate-[slideInRight_0.3s_ease-out]">
       <div className="flex flex-1 gap-0 px-8 pt-4 pb-0">
         <div className="flex-1 flex flex-col justify-center gap-2">
-          {keys.map((key) => (
+          {keys.map((key, idx) => (
             <div key={key.id} className="flex items-center gap-4">
               <div className="w-6 h-6 rounded-full bg-inputDark border border-gray-700 flex items-center justify-center text-gray-400 text-xs font-bold shadow-inner">
                 {key.id}
               </div>
-              <div className="flex-1 bg-inputDark rounded px-4 py-2 flex justify-between items-center border border-gray-800 hover:border-gray-600 transition-colors cursor-pointer group shadow-sm">
-                <span className="text-gray-300 text-xs font-medium">{key.label}</span>
-                <div className="text-gray-600 group-hover:text-gray-400"><Icons.ChevronDown /></div>
+              <div className="flex-1 flex items-center gap-2">
+                <div className="flex-1">
+                  <CustomSelect
+                    value={actionLabel(settings.keymap[idx] ?? 0)}
+                    options={actionOptions}
+                    onChange={(v) => handleKeymap(idx, v)}
+                  />
+                </div>
               </div>
             </div>
           ))}

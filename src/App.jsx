@@ -45,6 +45,10 @@ export default function App() {
       debounceTime: '0 ms',
       sleepTime: '1 min',
       profile: 'Profile 1 (Onboard)',
+      // Per-button action codes for all 6 remappable buttons (Left, Right,
+      // Middle, Back, Forward, DPI Loop). 0=Disabled, 1=Left, 2=Right,
+      // 3=Middle, 4=Back, 5=Forward, 9=DPI Loop.
+      keymap: [1, 2, 3, 4, 5, 9],
     },
     performance: {
       dpiStages: 4,
@@ -110,6 +114,10 @@ export default function App() {
       const motionSyncVal = await fetchAndLog(MOD_MOTION, 'motion_sync');
       const debounceMsVal = await fetchAndLog('buttons_cfg', 'debounce_ms');
       const sleepTimeSecVal = await fetchAndLog('power_cfg', 'sleep_time');
+      const keymapVals = [];
+      for (let i = 1; i <= 6; i++) {
+        keymapVals.push(await fetchAndLog('buttons_cfg', `keymap_btn_${i}`));
+      }
 
       console.log('[App] Fetching Battery level...');
       const batLevel = await WebHIDService.getConfig('battery_meas', 'bat_level');
@@ -150,6 +158,9 @@ export default function App() {
               sleepTimeSecVal !== null
                 ? secToSleepLabel(sleepTimeSecVal)
                 : prev.keyConfig.sleepTime,
+            keymap: keymapVals.map((v, i) =>
+              v !== null ? v : prev.keyConfig.keymap[i]
+            ),
           },
         };
       });
@@ -232,6 +243,41 @@ export default function App() {
     const intervalId = setInterval(refreshBattery, 30000);
     return () => clearInterval(intervalId);
   }, [device, isSyncing, isUpdating]);
+
+  // While the Performance tab is open, poll the active CPI stage so a physical
+  // DPI-Loop button press (which cycles cpi_stage_active in firmware) is
+  // reflected in the highlighted DPI stage. WebHID has no push channel, so we
+  // poll; scoped to the Performance tab to avoid idle background traffic.
+  useEffect(() => {
+    if (activeTab !== 'Performance') return;
+    if (!device || isUpdating) return;
+
+    const refreshActiveStage = async () => {
+      if (document.visibilityState !== 'visible') return;
+      if (WebHIDService.isConnecting || isSyncing) return;
+      try {
+        const stage = await WebHIDService.getConfig('motion/paw3395', 'cpi_stage_active');
+        if (stage === null) return;
+        setConfig((prev) => {
+          const cur = prev.performance.dpis.findIndex((d) => d.active) + 1;
+          if (cur === stage) return prev;
+          return {
+            ...prev,
+            performance: {
+              ...prev.performance,
+              dpis: prev.performance.dpis.map((d, i) => ({ ...d, active: i + 1 === stage })),
+            },
+          };
+        });
+      } catch {
+        // ignore — disconnect handler clears state separately
+      }
+    };
+
+    refreshActiveStage();
+    const intervalId = setInterval(refreshActiveStage, 1000);
+    return () => clearInterval(intervalId);
+  }, [activeTab, device, isSyncing, isUpdating]);
 
   // If the Firmware tab is active but the user unplugs the cable (or plugs the
   // dongle, switching to wireless), bounce back to Main so we don't strand them
