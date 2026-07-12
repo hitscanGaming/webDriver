@@ -1,12 +1,22 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Icons } from './components/Icons.jsx';
 import { MainView } from './views/MainView.jsx';
-import { KeyConfigurationView } from './views/KeyConfigurationView.jsx';
+import { KeyConfigurationView, SLEEP_TIME_TO_SEC } from './views/KeyConfigurationView.jsx';
 import { PerformanceView } from './views/PerformanceView.jsx';
 import { FirmwareView } from './views/FirmwareView.jsx';
 import { WebHIDService, ConfigStatus, VENDOR_ID } from './services/WebHIDService.js';
 
 const BASE_TABS = ['Main', 'Key Configuration', 'Performance'];
+
+// Map a power_cfg/sleep_time value (seconds) back to the nearest dropdown label.
+function secToSleepLabel(sec) {
+  const entries = Object.entries(SLEEP_TIME_TO_SEC);
+  let best = entries[0];
+  for (const e of entries) {
+    if (Math.abs(e[1] - sec) < Math.abs(best[1] - sec)) best = e;
+  }
+  return best[0];
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('Main');
@@ -33,7 +43,6 @@ export default function App() {
     keyConfig: {
       motionSync: false,
       debounceTime: '0 ms',
-      autoSleep: false,
       sleepTime: '1 min',
       profile: 'Profile 1 (Onboard)',
     },
@@ -97,6 +106,11 @@ export default function App() {
       const rippleVal = await fetchAndLog(MOD_MOTION, 'ripple_control');
       const snapVal = await fetchAndLog(MOD_MOTION, 'angle_snap');
 
+      console.log('[App] Fetching Key Configuration settings...');
+      const motionSyncVal = await fetchAndLog(MOD_MOTION, 'motion_sync');
+      const debounceMsVal = await fetchAndLog('buttons_cfg', 'debounce_ms');
+      const sleepTimeSecVal = await fetchAndLog('power_cfg', 'sleep_time');
+
       console.log('[App] Fetching Battery level...');
       const batLevel = await WebHIDService.getConfig('battery_meas', 'bat_level');
       console.log('[App] batLevel:', batLevel);
@@ -124,6 +138,18 @@ export default function App() {
             lod: lodVal !== null ? (lodVal === 1 ? '1mm' : '2mm') : prev.performance.lod,
             ripple: rippleVal === 1,
             angleSnapping: snapVal === 1,
+          },
+          keyConfig: {
+            ...prev.keyConfig,
+            motionSync: motionSyncVal === 1,
+            debounceTime:
+              debounceMsVal !== null
+                ? `${debounceMsVal} ms`
+                : prev.keyConfig.debounceTime,
+            sleepTime:
+              sleepTimeSecVal !== null
+                ? secToSleepLabel(sleepTimeSecVal)
+                : prev.keyConfig.sleepTime,
           },
         };
       });
@@ -336,7 +362,11 @@ export default function App() {
         <div className="flex-1 bg-panelDark relative overflow-hidden">
           {activeTab === 'Main' && <MainView />}
           {activeTab === 'Key Configuration' && (
-            <KeyConfigurationView config={config} updateConfig={(k, v) => updateKeyConfig(k, v)} />
+            <KeyConfigurationView
+              config={config}
+              updateConfig={(k, v) => updateKeyConfig(k, v)}
+              onProtocolError={handleProtocolError}
+            />
           )}
           {activeTab === 'Performance' && (
             <PerformanceView

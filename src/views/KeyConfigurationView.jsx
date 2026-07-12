@@ -1,9 +1,58 @@
 import { Icons } from '../components/Icons.jsx';
 import { MouseSVG } from '../components/MouseSVG.jsx';
 import { ToggleSwitch, CustomSelect } from '../components/UI.jsx';
+import { WebHIDService } from '../services/WebHIDService.js';
 
-export const KeyConfigurationView = ({ config, updateConfig }) => {
+// Sleep Time dropdown labels and their whole-second values. Shared with
+// App.jsx, which reverse-maps the value read back from power_cfg/sleep_time.
+export const SLEEP_TIME_OPTIONS = ['10 s', '30 s', '1 min', '5 min', '10 min'];
+export const SLEEP_TIME_TO_SEC = {
+  '10 s': 10,
+  '30 s': 30,
+  '1 min': 60,
+  '5 min': 300,
+  '10 min': 600,
+};
+
+export const KeyConfigurationView = ({ config, updateConfig, onProtocolError }) => {
   const { keyConfig: settings } = config;
+
+  const reportError = (label, err) => {
+    const status = WebHIDService.lastStatus;
+    const reason = err ? err.message : WebHIDService.statusToMessage(status);
+    console.error(`[HID] ${label} failed: ${reason}`);
+    if (onProtocolError) onProtocolError(label, reason);
+  };
+
+  const commitSet = async (label, module, option, value) => {
+    try {
+      const ok = await WebHIDService.setConfig(module, option, value);
+      if (!ok) reportError(label, null);
+      return ok;
+    } catch (e) {
+      reportError(label, e);
+      return false;
+    }
+  };
+
+  const handleMotionSync = async (val) => {
+    updateConfig('motionSync', val);
+    await commitSet('Motion Sync', 'motion/paw3395', 'motion_sync', val ? 1 : 0);
+  };
+
+  const handleDebounceTime = async (label) => {
+    updateConfig('debounceTime', label);
+    const ms = parseInt(label, 10) || 0;
+    await commitSet('Debounce Time', 'buttons_cfg', 'debounce_ms', ms);
+  };
+
+  // Sleep Time drives the firmware power manager's system-off timeout via the
+  // power_cfg config-channel module. The dropdown label maps to whole seconds
+  // (e.g. "30 s" -> 30, "5 min" -> 300).
+  const handleSleepTime = async (label) => {
+    updateConfig('sleepTime', label);
+    await commitSet('Sleep Time', 'power_cfg', 'sleep_time', SLEEP_TIME_TO_SEC[label] ?? 60);
+  };
 
   const keys = [
     { id: 1, label: 'Left Click' },
@@ -41,7 +90,7 @@ export const KeyConfigurationView = ({ config, updateConfig }) => {
         <div className="flex-1 bg-panelDark rounded-lg p-5 grid grid-cols-[auto_1fr] gap-x-8 gap-y-4 items-center border border-borderDark shadow-lg">
           <span className="text-gray-400 text-xs font-medium">Motion Sync</span>
           <div className="flex justify-end">
-            <ToggleSwitch checked={settings.motionSync} onChange={(v) => updateConfig('motionSync', v)} />
+            <ToggleSwitch checked={settings.motionSync} onChange={handleMotionSync} />
           </div>
 
           <span className="text-gray-400 text-xs font-medium">Debounce Time</span>
@@ -49,21 +98,17 @@ export const KeyConfigurationView = ({ config, updateConfig }) => {
             <CustomSelect
               value={settings.debounceTime}
               options={['0 ms', '2 ms', '4 ms', '8 ms', '16 ms']}
-              onChange={(v) => updateConfig('debounceTime', v)}
+              onChange={handleDebounceTime}
             />
           </div>
 
-          <span className="text-gray-400 text-xs font-medium">Auto Sleep</span>
-          <div className="flex gap-4 items-center justify-end w-full">
-            <ToggleSwitch checked={settings.autoSleep} onChange={(v) => updateConfig('autoSleep', v)} />
-            <div className="w-24">
-              <CustomSelect
-                value={settings.sleepTime}
-                options={['1 min', '5 min', '10 min', 'Never']}
-                onChange={(v) => updateConfig('sleepTime', v)}
-                width="w-24"
-              />
-            </div>
+          <span className="text-gray-400 text-xs font-medium">Sleep Time</span>
+          <div className="flex justify-end w-full">
+            <CustomSelect
+              value={settings.sleepTime}
+              options={SLEEP_TIME_OPTIONS}
+              onChange={handleSleepTime}
+            />
           </div>
         </div>
 

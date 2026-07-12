@@ -42,8 +42,8 @@ export const ConfigStatus = {
 // section. Since issue #89, module IDs are deterministic: each module's
 // marker lives in a named subsection (config_channel_modules.<mod_name>)
 // and nrf_desktop.ld SORTs them, so IDs are ALPHABETICAL BY MODULE NAME
-// (battery_meas < dfu < motion) on every build config — LTO and CMake
-// order no longer matter. Regenerate via `.\scripts\hid_dump_ids.ps1
+// (battery_meas < buttons_cfg < dfu < motion < polling < power_cfg) on every build
+// config — LTO and CMake order no longer matter. Regenerate via `.\scripts\hid_dump_ids.ps1
 // -Format js` after adding/removing a config-channel module.
 // ble_bond is not compiled on either target (DESKTOP_BT=n), so it's not
 // listed. After discovery the dfu key becomes "dfu/B0" via the bootloader
@@ -56,8 +56,15 @@ const HARDCODED_CONFIG = {
     id: 0,
     options: { bat_level: 1 },
   },
-  dfu: {
+  buttons_cfg: {
     id: 1,
+    options: {
+      module_variant: 1,
+      debounce_ms: 2,
+    },
+  },
+  dfu: {
+    id: 2,
     options: {
       start: 1,
       data: 2,
@@ -69,7 +76,7 @@ const HARDCODED_CONFIG = {
     },
   },
   'motion/paw3395': {
-    id: 2,
+    id: 3,
     options: {
       module_variant: 1,
       cpi: 2,
@@ -84,14 +91,22 @@ const HARDCODED_CONFIG = {
       ripple_control: 11,
       angle_snap: 12,
       lod: 13,
+      motion_sync: 14,
     },
   },
   polling: {
-    id: 3,
+    id: 4,
     options: {
       module_variant: 1,
       poll_esb: 2,
       poll_usb: 3,
+    },
+  },
+  power_cfg: {
+    id: 5,
+    options: {
+      module_variant: 1,
+      sleep_time: 2,
     },
   },
 };
