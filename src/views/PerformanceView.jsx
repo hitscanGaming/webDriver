@@ -1,7 +1,13 @@
 import { ToggleSwitch, RadioGroup } from '../components/UI.jsx';
 import { WebHIDService } from '../services/WebHIDService.js';
 
-export const PerformanceView = ({ config, updateConfig, onProtocolError }) => {
+// The firmware keeps two independent polling rates: poll_usb (wired) and
+// poll_esb (wireless). USB HID caps out at 1 kHz; the 2/4/8 kHz rates only
+// exist on the ESB link, so they are offered only when connected wirelessly.
+const POLLING_RATES_WIRED = ['125', '250', '500', '1000'];
+const POLLING_RATES_WIRELESS = ['125', '250', '500', '1000', '2000', '4000', '8000'];
+
+export const PerformanceView = ({ config, updateConfig, onProtocolError, isWiredMouse }) => {
   const { performance: settings } = config;
   const { dpiStages, dpis, pollingRate, lod, ripple, angleSnapping } = settings;
 
@@ -50,12 +56,27 @@ export const PerformanceView = ({ config, updateConfig, onProtocolError }) => {
     if (stage) await commitSet(`DPI active`, 'motion', 'cpi', stage.value);
   };
 
+  // A device can hold a rate the current transport does not offer -- e.g. a
+  // poll_usb of 8000 written by the older UI, which set both transports at
+  // once. RadioGroup checks by exact string match, so an unlisted value left
+  // every button unselected and the control looked empty. Surface the real
+  // value instead, so it can be seen and changed.
+  const baseRates = isWiredMouse ? POLLING_RATES_WIRED : POLLING_RATES_WIRELESS;
+  const pollingRateOptions = baseRates.includes(String(pollingRate))
+    ? baseRates
+    : [...baseRates, String(pollingRate)].filter((r) => r !== 'null' && r !== 'undefined');
+
   const handlePollingRate = async (rate) => {
     updateConfig('pollingRate', rate);
     const val = parseInt(rate);
-    const ok = await commitSet(`Polling rate (ESB)`, 'polling', 'poll_esb', val);
-    if (!ok) return;
-    await commitSet(`Polling rate (USB)`, 'polling', 'poll_usb', val);
+    // Write only the transport in use. Writing both meant that setting 1 kHz
+    // while wired silently overwrote the wireless rate (default 8 kHz), and an
+    // export afterwards recorded that loss as if it were intentional.
+    if (isWiredMouse) {
+      await commitSet(`Polling rate (USB)`, 'polling', 'poll_usb', val);
+    } else {
+      await commitSet(`Polling rate (ESB)`, 'polling', 'poll_esb', val);
+    }
   };
 
   const handleLOD = async (valStr) => {
@@ -131,9 +152,11 @@ export const PerformanceView = ({ config, updateConfig, onProtocolError }) => {
 
       <div className="grid grid-cols-2 gap-8 h-40">
         <div className="bg-[#0b0b0b] border border-borderDark rounded-lg p-6 flex flex-col items-center justify-center gap-5 shadow-lg">
-          <span className="text-[#d4d4d4] text-xs font-bold tracking-wide">Polling Rate (Hz)</span>
+          <span className="text-[#d4d4d4] text-xs font-bold tracking-wide">
+            Polling Rate (Hz) {isWiredMouse ? '— Wired' : '— Wireless'}
+          </span>
           <RadioGroup
-            options={['125', '250', '500', '1000', '2000', '4000', '8000']}
+            options={pollingRateOptions}
             selected={pollingRate}
             onChange={handlePollingRate}
           />

@@ -2,6 +2,14 @@ import { Icons } from '../components/Icons.jsx';
 import { MouseSVG } from '../components/MouseSVG.jsx';
 import { ToggleSwitch, CustomSelect } from '../components/UI.jsx';
 import { WebHIDService } from '../services/WebHIDService.js';
+import {
+  exportProfile,
+  importProfile,
+  profileToBlob,
+  downloadBlob,
+  pickFile,
+  readFileAsJson,
+} from '../services/ProfileIO.js';
 
 // Sleep Time dropdown labels and their whole-second values. Shared with
 // App.jsx, which reverse-maps the value read back from power_cfg/sleep_time.
@@ -14,7 +22,13 @@ export const SLEEP_TIME_TO_SEC = {
   '10 min': 600,
 };
 
-export const KeyConfigurationView = ({ config, updateConfig, onProtocolError }) => {
+export const KeyConfigurationView = ({
+  config,
+  updateConfig,
+  onProtocolError,
+  onResync,
+  isWiredMouse,
+}) => {
   const { keyConfig: settings } = config;
 
   const reportError = (label, err) => {
@@ -93,6 +107,103 @@ export const KeyConfigurationView = ({ config, updateConfig, onProtocolError }) 
     { id: 6, label: 'DPI Loop' },
   ];
 
+  const handleProfileChange = async (label) => {
+    // Firmware active_slot is informational only in PR5 (slot rotation
+    // deferred); the wire SET still persists the selection so a future
+    // PR can pick it up.
+    updateConfig('profile', label);
+    const m = /Profile (\d+)/.exec(label);
+    const slot = m ? parseInt(m[1], 10) - 1 : 0;
+    await commitSet('Active profile', 'profile', 'active_slot', slot);
+  };
+
+  const handleExport = async () => {
+    try {
+      const { blob: profileObj, failures } = await exportProfile();
+      if (failures.length) {
+        console.warn('[Profile] Export had partial failures:', failures);
+      }
+      const filename = `hitscan-profile-${new Date().toISOString().slice(0, 10)}.json`;
+      downloadBlob(profileToBlob(profileObj), filename);
+    } catch (e) {
+      reportError('Export Config', e);
+    }
+  };
+
+  const handleImport = async () => {
+    try {
+      const file = await pickFile();
+      const json = await readFileAsJson(file);
+      const { applied, failures } = await importProfile(json);
+      console.log(`[Profile] Imported ${applied.length} options`, applied);
+      if (failures.length) {
+        console.warn('[Profile] Import failures:', failures);
+        reportError('Import Config', { message: `${failures.length} failures (see console)` });
+      }
+      // importProfile writes straight to the device and never touches React
+      // state, so every imported control would keep rendering its pre-import
+      // value until the page was reloaded. Read the device back instead of
+      // mirroring the JSON locally -- that also surfaces any option the
+      // firmware clamped or rejected.
+      if (onResync) {
+        console.log('[Profile] Re-syncing UI after import.');
+        await onResync();
+      }
+    } catch (e) {
+      reportError('Import Config', e);
+    }
+  };
+
+  const handleFactoryReset = async () => {
+    const ok = window.confirm(
+      'Factory reset will erase all customizations on this profile and reboot the device. Continue?'
+    );
+    if (!ok) return;
+    // The device erases its settings and then warm-reboots, so the link drops
+    // by design. A missing SUCCESS response is therefore not evidence of
+    // failure -- the reset has already happened by the time the reply would be
+    // sent. Reporting an error here made a working reset look broken.
+    try {
+      await WebHIDService.setConfig('profile', 'factory_reset_active', 1);
+    } catch (e) {
+      console.log('[Profile] Link dropped during factory reset (expected):', e.message);
+    }
+    console.log('[Profile] Factory reset sent; device is rebooting.');
+
+    // Wired: the mouse IS the HID device, so the reset reboot tears the
+    // handle down and USB re-enumerates it. The connect listener re-syncs on
+    // its own -- syncing here would only poll a dead handle, and since
+    // getConfig times out rather than throwing, that cost ~48 s of apparent
+    // hang.
+    //
+    // Wireless: the browser holds the dongle, which stays enumerated across
+    // the mouse's reboot. No HID event fires, so this is the only thing that
+    // refreshes the UI. Wait for the mouse to come back (1.5 s reboot delay +
+    // boot + ESB re-association).
+    if (isWiredMouse) {
+      console.log('[Profile] Wired: awaiting USB re-enumeration to re-sync.');
+      // The handle we hold dies with the reboot. Drop it now so the resync
+      // re-acquires the re-enumerated device instead of issuing transfers
+      // against a dead one.
+      WebHIDService.forgetDevice();
+      // Belt and braces: the connect listener should fire on re-enumeration,
+      // but it has proven unreliable here. Re-read once the device has had
+      // time to come back. fetchSettings no-ops on a closed handle, so this
+      // is cheap if the listener already did the work.
+      if (onResync) {
+        await new Promise((r) => setTimeout(r, 6000));
+        console.log('[Profile] Wired fallback re-sync after reset.');
+        await onResync();
+      }
+      return;
+    }
+    if (onResync) {
+      await new Promise((r) => setTimeout(r, 4000));
+      console.log('[Profile] Re-syncing UI after reset reboot.');
+      await onResync();
+    }
+  };
+
   return (
     <div className="flex flex-col h-full animate-[slideInRight_0.3s_ease-out]">
       <div className="flex flex-1 gap-0 px-8 pt-4 pb-0">
@@ -152,19 +263,28 @@ export const KeyConfigurationView = ({ config, updateConfig, onProtocolError }) 
           <CustomSelect
             value={settings.profile}
             options={['Profile 1 (Onboard)', 'Profile 2', 'Profile 3']}
-            onChange={(v) => updateConfig('profile', v)}
+            onChange={handleProfileChange}
           />
 
           <div className="flex gap-3 mt-4">
-            <button className="flex-1 flex items-center justify-center gap-2 bg-transparent border border-gray-700 hover:border-gray-500 hover:bg-gray-800 text-gray-300 text-xs py-2 rounded transition-all">
+            <button
+              onClick={handleImport}
+              className="flex-1 flex items-center justify-center gap-2 bg-transparent border border-gray-700 hover:border-gray-500 hover:bg-gray-800 text-gray-300 text-xs py-2 rounded transition-all"
+            >
               Import Config <Icons.Download />
             </button>
-            <button className="flex-1 flex items-center justify-center gap-2 bg-transparent border border-gray-700 hover:border-gray-500 hover:bg-gray-800 text-gray-300 text-xs py-2 rounded transition-all">
+            <button
+              onClick={handleExport}
+              className="flex-1 flex items-center justify-center gap-2 bg-transparent border border-gray-700 hover:border-gray-500 hover:bg-gray-800 text-gray-300 text-xs py-2 rounded transition-all"
+            >
               Export Config <Icons.Upload />
             </button>
           </div>
 
-          <button className="w-full flex items-center justify-center gap-2 bg-transparent border border-gray-700 hover:border-gray-500 hover:bg-gray-800 text-gray-300 text-xs py-2 rounded mt-2 transition-all">
+          <button
+            onClick={handleFactoryReset}
+            className="w-full flex items-center justify-center gap-2 bg-transparent border border-gray-700 hover:border-gray-500 hover:bg-gray-800 text-gray-300 text-xs py-2 rounded mt-2 transition-all"
+          >
             Factory Reset <Icons.RotateCcw />
           </button>
         </div>

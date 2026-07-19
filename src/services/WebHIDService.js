@@ -11,6 +11,22 @@ export const VENDOR_ID = 0x1915;
 const OPT_MODULE_DESCR = 0;
 const END_OF_TRANSFER_CHAR = '\n';
 const OPT_NAME_MODULE_VARIANT = 'module_variant';
+// A HID transfer issued against a handle whose USB device has gone away never
+// settles -- Chrome neither resolves nor rejects it. One such call wedges the
+// serialized exchange queue for the lifetime of the page, which is why a wired
+// factory reset could only be recovered by reloading. Bound every transfer.
+const HID_OP_TIMEOUT_MS = 1500;
+
+const withHidTimeout = (promise, ms, label) => {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+};
+
 const POLL_INTERVAL_DEFAULT_MS = 20;
 const POLL_RETRY_DEFAULT = 200;
 
@@ -115,6 +131,14 @@ const HARDCODED_CONFIG = {
       sleep_time: 2,
     },
   },
+  profile: {
+    id: 6,
+    options: {
+      module_variant: 1,
+      active_slot: 2,
+      factory_reset_active: 3,
+    },
+  },
 };
 
 const STATUS_TO_MESSAGE = {
@@ -205,6 +229,43 @@ export const WebHIDService = {
     this.configMap = HARDCODED_CONFIG;
   },
 
+  // USB re-enumerates before the firmware's config channel starts answering,
+  // so a sync fired straight off the HID connect event gets no response on any
+  // option -- each one burns its full poll timeout and resolves null, and the
+  // caller then keeps its previous values. Probe with a cheap FETCH
+  // (battery_meas/bat_level, event id 1) using a short per-attempt timeout
+  // until the device replies.
+  // Drop the current handle without awaiting close(): on a device that has
+  // gone away, close() can hang exactly like a transfer. The next
+  // checkConnection() re-acquires from navigator.hid.getDevices().
+  forgetDevice() {
+    const stale = this.device;
+    this.device = null;
+    if (stale && stale.opened) {
+      stale.close().catch(() => {});
+    }
+  },
+
+  async waitUntilResponsive(timeoutMs = 15000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.device && this.device.opened) {
+        try {
+          const r = await this.exchangeFeatureReport(0, 1, ConfigStatus.FETCH, null, {
+            maxRetries: 10,
+            verbose: false,
+          });
+          if (r) return true;
+        } catch {
+          /* device mid-reboot; keep probing */
+        }
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    console.warn('[HID] waitUntilResponsive: device did not answer in time.');
+    return false;
+  },
+
   async checkConnection() {
     if (this._checkConnectionInFlight) {
       return this._checkConnectionInFlight;
@@ -225,7 +286,13 @@ export const WebHIDService = {
     }
 
     const devices = await navigator.hid.getDevices();
-    const pairedDevice = devices.find((d) => d.vendorId === VENDOR_ID);
+    const ours = devices.filter((d) => d.vendorId === VENDOR_ID);
+    // With both the cable and the dongle attached, the mouse is physically in
+    // wired mode -- usb_state suspends the radio -- so the wired handle is the
+    // one reflecting live behaviour. Plain find() returned whichever the
+    // browser happened to list first, which was usually the dongle.
+    const pairedDevice =
+      ours.find((d) => (d.productId & 0xf000) !== 0xf000) ?? ours[0];
 
     if (pairedDevice) {
       try {
@@ -275,7 +342,11 @@ export const WebHIDService = {
       }
 
       try {
-        await this.device.sendFeatureReport(REPORT_ID, buffer);
+        await withHidTimeout(
+          this.device.sendFeatureReport(REPORT_ID, buffer),
+          HID_OP_TIMEOUT_MS,
+          'sendFeatureReport'
+        );
       } catch (e) {
         console.error('[HID] Send Error:', e);
         this.lastStatus = ConfigStatus.DISCONNECTED;
@@ -286,7 +357,11 @@ export const WebHIDService = {
         await sleep(pollIntervalMs);
 
         try {
-          const view = await this.device.receiveFeatureReport(REPORT_ID);
+          const view = await withHidTimeout(
+            this.device.receiveFeatureReport(REPORT_ID),
+            HID_OP_TIMEOUT_MS,
+            'receiveFeatureReport'
+          );
 
           if (verbose && view && view.buffer) {
             console.log(`[HID] RAW DATA: ${this.toHexString(view.buffer)}`);
@@ -328,7 +403,15 @@ export const WebHIDService = {
             console.warn(`[HID] Mismatch: Expected ${recipient}/${eventId}, Got ${r_rcpt}/${r_evt}`);
           }
         } catch (e) {
-          // Ignore read errors during polling
+          // A timeout means the device is gone rather than merely slow to
+          // answer; retrying burns the whole budget (200 x 1.5 s) against a
+          // dead handle. Give up now so the caller can re-acquire.
+          if (e && /timed out/.test(e.message)) {
+            console.warn(`[HID] ${e.message} -- abandoning exchange.`);
+            this.lastStatus = ConfigStatus.DISCONNECTED;
+            return null;
+          }
+          // Ignore transient read errors during polling
         }
       }
       console.warn('[HID] Timeout waiting for response');

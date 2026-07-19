@@ -81,6 +81,23 @@ export default function App() {
 
   const fetchSettings = async () => {
     console.log('[App] fetchSettings initiated.');
+    // getConfig resolves null rather than throwing when responses stop, so a
+    // sync against a closed handle burns the full 200 x 20 ms timeout on every
+    // option -- ~48 s of apparent hang. Bail out instead; the HID connect
+    // handler re-syncs once the device is back.
+    if (!WebHIDService.device || !WebHIDService.device.opened) {
+      console.warn('[App] fetchSettings skipped: device handle is not open.');
+      return;
+    }
+    // Enumerated is not the same as ready: after a factory reset USB comes back
+    // before the config channel answers. Syncing then returns null for every
+    // option, and each field falls back to its previous value -- the UI silently
+    // keeps pre-reset settings. Wait for a real response first.
+    if (!(await WebHIDService.waitUntilResponsive())) {
+      console.warn('[App] fetchSettings aborted: device not responding.');
+      setStatusMessage('Device not responding. Try reconnecting.');
+      return;
+    }
     const failures = [];
     try {
       setIsSyncing(true);
@@ -105,7 +122,13 @@ export default function App() {
       await fetchAndLog(MOD_MOTION, 'cpi');
 
       console.log('[App] Fetching Performance settings...');
-      const pollRate = await fetchAndLog('polling', 'poll_esb');
+      // Read the rate for the transport actually in use. Derived from the live
+      // device rather than the isWiredMouse state: setIsDongle() runs just
+      // before this call, so the state closure would still hold the previous
+      // render's value on first connect.
+      const hidDev = WebHIDService.device;
+      const wired = hidDev ? (hidDev.productId & 0xf000) !== 0xf000 : false;
+      const pollRate = await fetchAndLog('polling', wired ? 'poll_usb' : 'poll_esb');
       const lodVal = await fetchAndLog(MOD_MOTION, 'lod');
       const rippleVal = await fetchAndLog(MOD_MOTION, 'ripple_control');
       const snapVal = await fetchAndLog(MOD_MOTION, 'angle_snap');
@@ -118,6 +141,7 @@ export default function App() {
       for (let i = 1; i <= 6; i++) {
         keymapVals.push(await fetchAndLog('buttons_cfg', `keymap_btn_${i}`));
       }
+      const activeSlotVal = await fetchAndLog('profile', 'active_slot');
 
       console.log('[App] Fetching Battery level...');
       const batLevel = await WebHIDService.getConfig('battery_meas', 'bat_level');
@@ -161,6 +185,12 @@ export default function App() {
             keymap: keymapVals.map((v, i) =>
               v !== null ? v : prev.keyConfig.keymap[i]
             ),
+            profile:
+              activeSlotVal !== null
+                ? activeSlotVal === 0
+                  ? 'Profile 1 (Onboard)'
+                  : `Profile ${activeSlotVal + 1}`
+                : prev.keyConfig.profile,
           },
         };
       });
@@ -183,13 +213,36 @@ export default function App() {
     setStatusMessage(`${label}: ${reason}`);
   }, []);
 
-  const syncFromAttachedDevice = useCallback(async () => {
+
+  // force: re-sync even when a device is already held. A wired factory reset
+  // reboots the mouse, and WebHID may hand back the same HIDDevice object on
+  // re-enumeration -- and the disconnect handler only clears `device` when the
+  // event carries that exact object, so it often stays set. Gating purely on
+  // `!device` therefore skipped the sync and left the UI showing pre-reset
+  // values until the page was reloaded.
+  const syncFromAttachedDevice = useCallback(async (force = false) => {
     if (WebHIDService.isConnecting) return;
-    if (syncInFlightRef.current) return;
+    // A forced sync (post-reset, or a device that just re-appeared) carries
+    // information the in-flight one does not: that sync may have started while
+    // the device was still rebooting and be reading nothing. Wait it out rather
+    // than dropping the request, which left the UI stale after every wired
+    // factory reset.
+    if (syncInFlightRef.current) {
+      if (!force) return;
+      const waitUntil = Date.now() + 60000;
+      while (syncInFlightRef.current && Date.now() < waitUntil) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (syncInFlightRef.current) {
+        console.warn('[App] forced sync gave up waiting for the in-flight one.');
+        return;
+      }
+    }
     syncInFlightRef.current = true;
     try {
       const connectedDevice = await WebHIDService.checkConnection();
-      if (connectedDevice && !device) {
+      if (!connectedDevice) return;
+      if (force || !device || connectedDevice.device !== device) {
         setDevice(connectedDevice.device);
         setIsDongle(connectedDevice.isDongle);
         await fetchSettings();
@@ -199,6 +252,15 @@ export default function App() {
     }
   }, [device]);
 
+  // Resync handed to views. Must route through syncFromAttachedDevice rather
+  // than fetchSettings: after a wired factory reset the held handle is closed,
+  // and only checkConnection() re-acquires and re-opens it. fetchSettings on
+  // its own would hit the closed-handle guard and silently no-op.
+  const resyncDevice = useCallback(
+    () => syncFromAttachedDevice(true),
+    [syncFromAttachedDevice]
+  );
+
   useEffect(() => {
     if (!navigator.hid) return;
 
@@ -206,7 +268,10 @@ export default function App() {
 
     const onHidConnect = (event) => {
       if (event.device.vendorId !== VENDOR_ID) return;
-      syncFromAttachedDevice();
+      // A connect event means the device just (re-)appeared, so its settings
+      // may differ from what is on screen -- e.g. a wired factory reset.
+      // Always re-read rather than trusting the handle we already hold.
+      syncFromAttachedDevice(true);
     };
 
     const onHidDisconnect = (event) => {
@@ -412,6 +477,8 @@ export default function App() {
               config={config}
               updateConfig={(k, v) => updateKeyConfig(k, v)}
               onProtocolError={handleProtocolError}
+              onResync={resyncDevice}
+              isWiredMouse={isWiredMouse}
             />
           )}
           {activeTab === 'Performance' && (
@@ -419,6 +486,7 @@ export default function App() {
               config={config}
               updateConfig={(k, v) => updatePerformanceConfig(k, v)}
               onProtocolError={handleProtocolError}
+              isWiredMouse={isWiredMouse}
             />
           )}
           {activeTab === 'Firmware' && isWiredMouse && (
