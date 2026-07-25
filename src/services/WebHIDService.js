@@ -8,13 +8,33 @@ const REPORT_USER_CONFIG_SIZE = 29;
 const REPORT_SIZE = 1 + REPORT_USER_CONFIG_SIZE;
 export const VENDOR_ID = 0x1915;
 
-// SPI recipient byte values, mirrored from firmware/mouse/src/modules/spi_protocol.h.
+// SPI recipient byte values, mirrored from firmware/mouse/src/modules/spi_protocol.h
+// and firmware/ch32v305/User/dfu.h.
 // 0x00: route over ESB to the mouse (existing mouse-DFU and live-config path).
 // 0x01: dongle's pairing trigger (see startPairing() below).
 // 0x02: dispatch as a local cfg_event on the dongle (dongle-DFU path).
+// 0x03: CH32V305 consumes locally for its in-app DFU (ch32v305 DFU path).
 export const RECIPIENT_MOUSE = 0;
 export const RECIPIENT_PAIRING = 1;
 export const RECIPIENT_DONGLE_LOCAL = 2;
+export const RECIPIENT_CH32V305 = 3;
+
+// CH32V305 has no CAF / config-channel discovery — hardcoded module
+// descriptor matches firmware/ch32v305/User/dfu.h DFU_OPT_* constants.
+// Module ID 0 (sole module); options 1..5; status decoding via the same
+// ConfigStatus enum as the mouse/dongle paths.
+const HARDCODED_CONFIG_CH32V305 = {
+  dfu: {
+    id: 0,
+    options: {
+      start: 1,
+      data: 2,
+      sync: 3,
+      reboot: 4,
+      fwinfo: 5,
+    },
+  },
+};
 
 const OPT_MODULE_DESCR = 0;
 const END_OF_TRANSFER_CHAR = '\n';
@@ -638,11 +658,23 @@ export const WebHIDService = {
   },
 
   // Find the dfu module in the right configMap, tolerating the variant
-  // suffix ("dfu/B0", "dfu/MCUBOOT"). target = 'mouse' | 'dongle'.
+  // suffix ("dfu/B0", "dfu/MCUBOOT"). target = 'mouse' | 'dongle' | 'ch32v305'.
   // For 'dongle' the caller must have already awaited discoverDongleConfig().
+  // 'ch32v305' uses HARDCODED_CONFIG_CH32V305 — CH32V305 has no runtime discovery.
   // Returns { name, id, options, recipient } or null.
   findDfuModule(target = 'mouse') {
-    const map = target === 'dongle' ? this.dongleConfigMap : this.configMap;
+    let map;
+    let recipient;
+    if (target === 'ch32v305') {
+      map = HARDCODED_CONFIG_CH32V305;
+      recipient = RECIPIENT_CH32V305;
+    } else if (target === 'dongle') {
+      map = this.dongleConfigMap;
+      recipient = RECIPIENT_DONGLE_LOCAL;
+    } else {
+      map = this.configMap;
+      recipient = RECIPIENT_MOUSE;
+    }
     if (!map) return null;
     const key = Object.keys(map).find((k) => k === 'dfu' || k.startsWith('dfu/'));
     if (!key) return null;
@@ -651,7 +683,7 @@ export const WebHIDService = {
       name: key,
       id: mod.id,
       options: mod.options,
-      recipient: target === 'dongle' ? RECIPIENT_DONGLE_LOCAL : RECIPIENT_MOUSE,
+      recipient,
     };
   },
 

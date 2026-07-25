@@ -493,7 +493,7 @@ export default function App() {
             <FirmwareView
               onProtocolError={handleProtocolError}
               onUpdatingChange={setIsUpdating}
-              target={isDongle ? 'dongle' : 'mouse'}
+              isDongle={isDongle}
             />
           )}
         </div>

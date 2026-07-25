@@ -2,12 +2,12 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { WebHIDService } from '../services/WebHIDService.js';
 import { fwinfo as dfuFwinfo, parseDfuZip, dfuTransfer } from '../services/DFUService.js';
 
-// Slot capacity per pm_static.yml — mouse (nRF52840) has 496 KB s0/s1 slots,
-// dongle (nRF52820) has 112 KB. Image size is checked against this before
-// the user can hit Start.
+// Slot capacity per pm_static.yml / CH32V305 SRAM image buffer.
+// Image size is checked against this before the user can hit Start.
 const SLOT_MAX_BYTES_BY_TARGET = {
   mouse: 0x7c000,    // 496 KB — hitscan_nrf52840/pm_static.yml
   dongle: 0x1c000,   // 112 KB — hitscan52820_nrf52820/pm_static.yml
+  ch32v305: 0x4000,  // 16 KB — firmware/ch32v305/User/dfu.c DFU_IMAGE_BUFFER_BYTES
 };
 
 // Manifest `board` field expected for each target. Used to warn when a user
@@ -15,6 +15,13 @@ const SLOT_MAX_BYTES_BY_TARGET = {
 const EXPECTED_BOARD_BY_TARGET = {
   mouse: 'hitscan',         // matches "hitscan" / "hitscan_nrf52840"
   dongle: 'hitscan52820',
+  ch32v305: 'ch32v305',
+};
+
+const TARGET_LABEL = {
+  mouse: 'Mouse',
+  dongle: 'Dongle',
+  ch32v305: 'CH32V305',
 };
 
 const formatBytes = (n) => `${(n / 1024).toFixed(1)} KB`;
@@ -39,7 +46,25 @@ const phaseLabel = (phase) => {
   }
 };
 
-export const FirmwareView = ({ onProtocolError, onUpdatingChange, target = 'mouse' }) => {
+export const FirmwareView = ({ onProtocolError, onUpdatingChange, isDongle = false }) => {
+  // Dongle handles can reach two DFU targets: the dongle itself (SPI
+  // recipient=2) and the CH32V305 bridge (SPI recipient=3). Mouse DFU is
+  // wired-only — pushing the ~100 KB mouse image over the slow ESB config
+  // channel is impractical, so it isn't offered wirelessly. Wired-mouse
+  // handles reach only the mouse. Persist the dongle-side selection across
+  // reloads for ergonomics.
+  const availableTargets = isDongle ? ['dongle', 'ch32v305'] : ['mouse'];
+  const [target, setTarget] = useState(() => {
+    if (!isDongle) return 'mouse';
+    const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('hitscan.dfu.target') : null;
+    return availableTargets.includes(stored) ? stored : availableTargets[0];
+  });
+  useEffect(() => {
+    if (isDongle && typeof localStorage !== 'undefined') {
+      localStorage.setItem('hitscan.dfu.target', target);
+    }
+  }, [isDongle, target]);
+
   const [fwInfoState, setFwInfoState] = useState({ loading: true, info: null, error: null });
   const [imageState, setImageState] = useState({ file: null, bytes: null, slotName: null, error: null });
   const [transfer, setTransfer] = useState({ running: false, bytesSent: 0, total: 0, phase: '', startedAt: 0, error: null, ok: false });
@@ -216,7 +241,11 @@ export const FirmwareView = ({ onProtocolError, onUpdatingChange, target = 'mous
       return <p className="text-sm text-gray-400">Pick a <code>.zip</code> package built for this device.</p>;
     }
     const i = fwInfoState.info;
-    const targetMatches = i && imageState.targetSlot === (1 - i.flashAreaId);
+    // CH32V305 is single-bank: always overwrite, no slot check. mouse/dongle
+    // use B0 dual-bank and require the zip's slot to be opposite the running one.
+    const targetMatches = target === 'ch32v305'
+      ? !!i
+      : i && imageState.targetSlot === (1 - i.flashAreaId);
     return (
       <div className="grid grid-cols-[auto_1fr_auto_1fr] gap-x-4 gap-y-2 items-center text-sm">
         <div className="text-gray-400">File</div>
@@ -263,22 +292,51 @@ export const FirmwareView = ({ onProtocolError, onUpdatingChange, target = 'mous
         {error && <p className="text-sm text-statusDanger">DFU failed: {error}</p>}
         {ok && (
           <p className="text-sm text-statusSuccess">
-            Transfer complete. The mouse is rebooting — reloading the web driver{reloadIn !== null ? ` in ${reloadIn}s…` : '…'}
+            Transfer complete. The {TARGET_LABEL[target].toLowerCase()} is rebooting — reloading the web driver{reloadIn !== null ? ` in ${reloadIn}s…` : '…'}
           </p>
         )}
       </div>
     );
   };
 
-  const canStart = !!imageState.bytes && !transfer.running && !!fwInfoState.info &&
-                   imageState.targetSlot === (1 - (fwInfoState.info?.flashAreaId ?? -2));
+  const canStart = !!imageState.bytes && !transfer.running && !!fwInfoState.info && (
+    target === 'ch32v305'
+      ? true
+      : imageState.targetSlot === (1 - (fwInfoState.info?.flashAreaId ?? -2))
+  );
 
   return (
     <div className="absolute inset-0 overflow-y-auto space-y-6 p-4 animate-[slideInRight_0.3s]">
+      {availableTargets.length > 1 && (
+        <section className="bg-panelDark border border-borderDark rounded-lg p-4 space-y-2">
+          <div className="text-xs text-gray-400">Target chip</div>
+          <div className="inline-flex rounded border border-borderDark overflow-hidden">
+            {availableTargets.map((t) => (
+              <button
+                key={t}
+                onClick={() => {
+                  if (transfer.running) return;
+                  setTarget(t);
+                  setImageState({ file: null, bytes: null, slotName: null, error: null });
+                }}
+                disabled={transfer.running}
+                className={`px-4 py-1.5 text-sm transition-colors ${
+                  target === t
+                    ? 'bg-statusInfo text-black font-semibold'
+                    : 'bg-inputDark text-gray-300 hover:bg-borderDark'
+                } disabled:opacity-40 disabled:cursor-not-allowed`}
+              >
+                {TARGET_LABEL[t]}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="bg-panelDark border border-borderDark rounded-lg p-4 space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">
-            Current firmware <span className="text-xs text-gray-500 font-normal">— target: {target}</span>
+            Current firmware <span className="text-xs text-gray-500 font-normal">— {TARGET_LABEL[target]}</span>
           </h2>
           <button
             className="text-xs text-statusInfo hover:underline"
@@ -317,9 +375,12 @@ export const FirmwareView = ({ onProtocolError, onUpdatingChange, target = 'mous
       <section className="bg-panelDark border border-borderDark rounded-lg p-4 space-y-3">
         <h2 className="text-lg font-semibold">Update</h2>
         <p className="text-xs text-gray-400">
-          {target === 'dongle'
-            ? 'The transfer typically runs ~30 seconds over the USB SPI bridge. Do not unplug. The dongle will reboot automatically when it finishes — please unplug and replug the dongle once the page reloads.'
-            : 'The transfer typically runs 5–10 minutes over the wired USB cable. Do not unplug. The mouse will reboot automatically when it finishes.'}
+          {target === 'dongle' &&
+            'The transfer typically runs ~30 seconds over the USB SPI bridge. Do not unplug. The dongle will reboot automatically when it finishes — please unplug and replug the dongle once the page reloads.'}
+          {target === 'ch32v305' &&
+            'The transfer typically runs ~10 seconds over the USB HID bridge. The CH32V305 stages the image in SRAM, then erases and rewrites its own flash in a single blocking pass. Do not unplug. The mouse will be unusable for ~1 second during the commit.'}
+          {target === 'mouse' &&
+            'The transfer typically runs 5–10 minutes over the wired USB cable. Do not unplug. The mouse will reboot automatically when it finishes.'}
         </p>
         <div className="flex gap-2">
           <button

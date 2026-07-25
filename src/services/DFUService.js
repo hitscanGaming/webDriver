@@ -186,7 +186,14 @@ export async function parseDfuZip(file, currentFlashAreaId) {
   const fileList = manifestJson.files || [];
   // Match the slot field; manifest stores it as a string in format-version 1,
   // possibly as an int in format-version 0. Compare numerically to be safe.
-  const slotEntry = fileList.find((f) => Number(f.slot) === targetSlot);
+  //
+  // Single-bank targets (CH32V305) ship a one-file manifest with no `slot`
+  // field; fall back to that single entry when slot matching would be
+  // ambiguous. This keeps the dual-bank (mouse, dongle) path unchanged.
+  let slotEntry = fileList.find((f) => Number(f.slot) === targetSlot);
+  if (!slotEntry && fileList.length === 1 && fileList[0].slot === undefined) {
+    slotEntry = fileList[0];
+  }
   if (!slotEntry || !slotEntry.file) {
     const available = fileList.map((f) => `${f.file}(slot=${f.slot})`).join(', ');
     throw new Error(`manifest has no entry for slot ${targetSlot}. Found: ${available || '(none)'}`);
