@@ -8,6 +8,14 @@ const REPORT_USER_CONFIG_SIZE = 29;
 const REPORT_SIZE = 1 + REPORT_USER_CONFIG_SIZE;
 export const VENDOR_ID = 0x1915;
 
+// SPI recipient byte values, mirrored from firmware/mouse/src/modules/spi_protocol.h.
+// 0x00: route over ESB to the mouse (existing mouse-DFU and live-config path).
+// 0x01: dongle's pairing trigger (see startPairing() below).
+// 0x02: dispatch as a local cfg_event on the dongle (dongle-DFU path).
+export const RECIPIENT_MOUSE = 0;
+export const RECIPIENT_PAIRING = 1;
+export const RECIPIENT_DONGLE_LOCAL = 2;
+
 const OPT_MODULE_DESCR = 0;
 const END_OF_TRANSFER_CHAR = '\n';
 const OPT_NAME_MODULE_VARIANT = 'module_variant';
@@ -141,6 +149,39 @@ const HARDCODED_CONFIG = {
   },
 };
 
+// Dongle-local config-channel modules (recipient=0x02), hardcoded for the same
+// reason as HARDCODED_CONFIG above: the dongle's `config_channel_modules`
+// section is SORTed alphabetically by ld, so IDs are deterministic
+// (dfu < profile => dfu=0, profile=1). Runtime rotating-MODULE_DESCR discovery
+// over the CH32V305 SPI bridge races on the bridge's response staging and
+// scrambles the reconstructed names (see issue #107), so we skip it: the DFU
+// flow only needs the module id, and every option id here matches the firmware
+// wire order (dfu.c opt_descr[]) — the same values DFUService/FirmwareView
+// already use as `?? N` fallbacks. Regenerate via `.\scripts\hid_dump_ids.ps1`
+// if a config-channel module is added to the dongle build (a module sorting
+// before "dfu" would shift dfu off id 0).
+const HARDCODED_DONGLE_CONFIG = {
+  dfu: {
+    id: 0,
+    options: {
+      start: 1,
+      data: 2,
+      sync: 3,
+      reboot: 4,
+      fwinfo: 5,
+      module_variant: 6,
+      devinfo: 7,
+    },
+  },
+  profile: {
+    id: 1,
+    options: {
+      factory_reset_active: 1,
+      active_slot: 2,
+    },
+  },
+};
+
 const STATUS_TO_MESSAGE = {
   [ConfigStatus.PENDING]: 'pending',
   [ConfigStatus.SUCCESS]: 'ok',
@@ -153,7 +194,11 @@ const STATUS_TO_MESSAGE = {
 
 export const WebHIDService = {
   device: null,
+  // configMap tracks modules reachable at recipient=0 (mouse over ESB, or
+  // a direct-wired mouse). dongleConfigMap is populated lazily by
+  // discoverDongleConfig() the first time the user targets the dongle for DFU.
   configMap: HARDCODED_CONFIG,
+  dongleConfigMap: null,
   isConnecting: false,
   // Shared in-flight promise for checkConnection(). React 18 StrictMode
   // double-mounts useEffect in dev, calling syncFromAttachedDevice twice in
@@ -495,9 +540,9 @@ export const WebHIDService = {
     return result[0];
   },
 
-  async _fetchOptionDescr(modId) {
+  async _fetchOptionDescr(modId, recipient = RECIPIENT_MOUSE) {
     const eventId = buildEventId(modId, OPT_MODULE_DESCR);
-    const result = await this.exchangeFeatureReport(0, eventId, ConfigStatus.FETCH, null, { verbose: false });
+    const result = await this.exchangeFeatureReport(recipient, eventId, ConfigStatus.FETCH, null, { verbose: false });
     if (!result) return null;
     return new TextDecoder('utf-8', { fatal: false }).decode(result).replace(/\0/g, '');
   },
@@ -505,12 +550,12 @@ export const WebHIDService = {
   // Walk the rotating MODULE_DESCR cursor for one module. Returns
   // { id, name, options: { name: id } } or null on failure.
   // Mirrors NrfHidDevice._discover_module_config (NCS hid_configurator).
-  async discoverModule(modId) {
+  async discoverModule(modId, recipient = RECIPIENT_MOUSE) {
     const fetched = [];
     let endIdx = -1;
     // Hard cap = 16 options + module name + EoT sentinel; one extra round trip for safety.
     for (let i = 0; i < 18; i++) {
-      const opt = await this._fetchOptionDescr(modId);
+      const opt = await this._fetchOptionDescr(modId, recipient);
       if (opt == null) return null;
       if (fetched.includes(opt)) break;
       if (opt[0] === END_OF_TRANSFER_CHAR) endIdx = fetched.length;
@@ -527,7 +572,7 @@ export const WebHIDService = {
     let finalName = name;
     if (OPT_NAME_MODULE_VARIANT in options) {
       const variantEventId = buildEventId(modId, options[OPT_NAME_MODULE_VARIANT]);
-      const variantResult = await this.exchangeFeatureReport(0, variantEventId, ConfigStatus.FETCH, null, { verbose: false });
+      const variantResult = await this.exchangeFeatureReport(recipient, variantEventId, ConfigStatus.FETCH, null, { verbose: false });
       if (variantResult) {
         const variant = new TextDecoder('utf-8', { fatal: false }).decode(variantResult).replace(/\0/g, '');
         finalName = `${name}/${variant}`;
@@ -536,14 +581,18 @@ export const WebHIDService = {
     return { id: modId, name: finalName, options };
   },
 
-  async discoverDeviceConfig() {
-    const maxId = await this.readMaxModId();
-    if (maxId == null) return null;
+  async discoverDeviceConfig(recipient = RECIPIENT_MOUSE) {
+    // readMaxModId hard-codes recipient=0; for dongle discovery we query
+    // GET_MAX_MOD_ID directly with the chosen recipient so we hit the
+    // dongle's own info module instead of the mouse's.
+    const maxResult = await this.exchangeFeatureReport(recipient, 0, ConfigStatus.GET_MAX_MOD_ID, null, { verbose: false });
+    if (!maxResult || maxResult.byteLength < 1) return null;
+    const maxId = maxResult[0];
     const config = {};
     for (let i = 0; i <= maxId; i++) {
-      const mod = await this.discoverModule(i);
+      const mod = await this.discoverModule(i, recipient);
       if (mod == null) {
-        console.warn(`[HID] discoverModule(${i}) failed`);
+        console.warn(`[HID] discoverModule(${i}, recipient=${recipient}) failed`);
         return null;
       }
       config[mod.name] = { id: mod.id, options: mod.options };
@@ -551,14 +600,59 @@ export const WebHIDService = {
     return config;
   },
 
-  // Find the dfu module in configMap, tolerating the variant suffix
-  // ("dfu/B0", "dfu/MCUBOOT", ...). Returns { name, id, options } or null —
-  // shape matches what DFUService callers (fwinfo, dfuTransfer) expect.
-  findDfuModule() {
-    const key = Object.keys(this.configMap).find((k) => k === 'dfu' || k.startsWith('dfu/'));
+  // Resolve the dongle-local config map. Uses HARDCODED_DONGLE_CONFIG rather
+  // than the rotating-MODULE_DESCR discovery: that multi-fetch races on the
+  // CH32V305 response staging and scrambles reconstructed module names (#107),
+  // and it only ever rediscovers constants (dfu=0) that the DFU flow already
+  // knows. We still do ONE reliable GET_MAX_MOD_ID round trip as a liveness
+  // check — it confirms the dongle answers on recipient 0x02 (i.e. a DFU-
+  // capable build is flashed) before we claim modules are available. Cached
+  // after first success. Returns the same shape as configMap, or null if the
+  // dongle does not respond.
+  async discoverDongleConfig() {
+    if (this.dongleConfigMap) return this.dongleConfigMap;
+    try {
+      const maxResult = await this.exchangeFeatureReport(
+        RECIPIENT_DONGLE_LOCAL, 0, ConfigStatus.GET_MAX_MOD_ID, null, { verbose: false });
+      if (!maxResult || maxResult.byteLength < 1) {
+        console.warn('[HID] Dongle did not respond to GET_MAX_MOD_ID');
+        return null;
+      }
+      const maxId = maxResult[0];
+      const expectedMaxId = Object.keys(HARDCODED_DONGLE_CONFIG).length - 1;
+      if (maxId !== expectedMaxId) {
+        // Non-fatal: the build's module set differs from the hardcoded table.
+        // Proceed with the table but flag it — dfu is still id 0 unless a
+        // module sorting before "dfu" was added (see #107 note above).
+        console.warn(
+          `[HID] Dongle max module id=${maxId}, expected ${expectedMaxId}; ` +
+          'HARDCODED_DONGLE_CONFIG may be stale — regenerate via hid_dump_ids.');
+      }
+      this.dongleConfigMap = HARDCODED_DONGLE_CONFIG;
+      console.log(`[HID] Dongle modules (hardcoded): ${Object.keys(HARDCODED_DONGLE_CONFIG).join(', ')}`);
+      return this.dongleConfigMap;
+    } catch (e) {
+      console.warn(`[HID] Dongle liveness check error: ${e.message}`);
+    }
+    return null;
+  },
+
+  // Find the dfu module in the right configMap, tolerating the variant
+  // suffix ("dfu/B0", "dfu/MCUBOOT"). target = 'mouse' | 'dongle'.
+  // For 'dongle' the caller must have already awaited discoverDongleConfig().
+  // Returns { name, id, options, recipient } or null.
+  findDfuModule(target = 'mouse') {
+    const map = target === 'dongle' ? this.dongleConfigMap : this.configMap;
+    if (!map) return null;
+    const key = Object.keys(map).find((k) => k === 'dfu' || k.startsWith('dfu/'));
     if (!key) return null;
-    const mod = this.configMap[key];
-    return { name: key, id: mod.id, options: mod.options };
+    const mod = map[key];
+    return {
+      name: key,
+      id: mod.id,
+      options: mod.options,
+      recipient: target === 'dongle' ? RECIPIENT_DONGLE_LOCAL : RECIPIENT_MOUSE,
+    };
   },
 
   startPairing() {

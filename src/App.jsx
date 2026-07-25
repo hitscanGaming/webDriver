@@ -25,10 +25,11 @@ export default function App() {
   const [statusMessage, setStatusMessage] = useState('Mouse not connected.');
   const [isSyncing, setIsSyncing] = useState(false);
   const [batteryLevel, setBatteryLevel] = useState(null);
-  // Firmware tab + DFU only render when a wired mouse is attached AND its DFU
-  // module was discovered. Dongle (PID 0xF***) hides the tab entirely.
+  // Firmware tab renders for any attached device. Wired-mouse handles target
+  // the mouse's DFU module (recipient=0); dongle handles (PID 0xF***) target
+  // the dongle's local DFU module (recipient=2) via the SPI bridge.
   const isWiredMouse = !!device && !isDongle;
-  const tabs = useMemo(() => (isWiredMouse ? [...BASE_TABS, 'Firmware'] : BASE_TABS), [isWiredMouse]);
+  const tabs = useMemo(() => (device ? [...BASE_TABS, 'Firmware'] : BASE_TABS), [device]);
   // Pause the 30 s battery poll while a DFU is in flight (concurrent FETCHes
   // would race the DFU sync polling and starve chunks).
   const [isUpdating, setIsUpdating] = useState(false);
@@ -344,14 +345,13 @@ export default function App() {
     return () => clearInterval(intervalId);
   }, [activeTab, device, isSyncing, isUpdating]);
 
-  // If the Firmware tab is active but the user unplugs the cable (or plugs the
-  // dongle, switching to wireless), bounce back to Main so we don't strand them
-  // on a tab that's about to disappear.
+  // If the Firmware tab is active but the user unplugs the device, bounce
+  // back to Main so we don't strand them on a tab without a target.
   useEffect(() => {
-    if (activeTab === 'Firmware' && !isWiredMouse) {
+    if (activeTab === 'Firmware' && !device) {
       setActiveTab('Main');
     }
-  }, [activeTab, isWiredMouse]);
+  }, [activeTab, device]);
 
   const connectMouse = async () => {
     if (device) {
@@ -489,10 +489,11 @@ export default function App() {
               isWiredMouse={isWiredMouse}
             />
           )}
-          {activeTab === 'Firmware' && isWiredMouse && (
+          {activeTab === 'Firmware' && device && (
             <FirmwareView
               onProtocolError={handleProtocolError}
               onUpdatingChange={setIsUpdating}
+              target={isDongle ? 'dongle' : 'mouse'}
             />
           )}
         </div>

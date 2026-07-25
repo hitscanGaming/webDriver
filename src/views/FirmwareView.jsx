@@ -2,7 +2,20 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { WebHIDService } from '../services/WebHIDService.js';
 import { fwinfo as dfuFwinfo, parseDfuZip, dfuTransfer } from '../services/DFUService.js';
 
-const SLOT_MAX_BYTES = 0x7c000; // 496 KB — matches pm_static.yml s0_image / s1_image size
+// Slot capacity per pm_static.yml — mouse (nRF52840) has 496 KB s0/s1 slots,
+// dongle (nRF52820) has 112 KB. Image size is checked against this before
+// the user can hit Start.
+const SLOT_MAX_BYTES_BY_TARGET = {
+  mouse: 0x7c000,    // 496 KB — hitscan_nrf52840/pm_static.yml
+  dongle: 0x1c000,   // 112 KB — hitscan52820_nrf52820/pm_static.yml
+};
+
+// Manifest `board` field expected for each target. Used to warn when a user
+// drops a zip built for the other target.
+const EXPECTED_BOARD_BY_TARGET = {
+  mouse: 'hitscan',         // matches "hitscan" / "hitscan_nrf52840"
+  dongle: 'hitscan52820',
+};
 
 const formatBytes = (n) => `${(n / 1024).toFixed(1)} KB`;
 const formatPct = (n, d) => (d > 0 ? `${((n / d) * 100).toFixed(1)}%` : '0%');
@@ -26,7 +39,7 @@ const phaseLabel = (phase) => {
   }
 };
 
-export const FirmwareView = ({ onProtocolError, onUpdatingChange }) => {
+export const FirmwareView = ({ onProtocolError, onUpdatingChange, target = 'mouse' }) => {
   const [fwInfoState, setFwInfoState] = useState({ loading: true, info: null, error: null });
   const [imageState, setImageState] = useState({ file: null, bytes: null, slotName: null, error: null });
   const [transfer, setTransfer] = useState({ running: false, bytesSent: 0, total: 0, phase: '', startedAt: 0, error: null, ok: false });
@@ -44,13 +57,22 @@ export const FirmwareView = ({ onProtocolError, onUpdatingChange }) => {
 
   const loadFwInfo = useCallback(async () => {
     setFwInfoState({ loading: true, info: null, error: null });
-    const dfuMod = WebHIDService.findDfuModule?.();
+    // Dongle discovery is lazy: only runs the ~11 extra round trips when the
+    // Firmware tab is actually opened against a dongle handle.
+    if (target === 'dongle' && !WebHIDService.dongleConfigMap) {
+      const discovered = await WebHIDService.discoverDongleConfig?.();
+      if (!discovered) {
+        setFwInfoState({ loading: false, info: null, error: 'Dongle did not respond to config-channel discovery. Confirm dongle DFU build is flashed.' });
+        return;
+      }
+    }
+    const dfuMod = WebHIDService.findDfuModule?.(target);
     if (!dfuMod) {
-      setFwInfoState({ loading: false, info: null, error: 'DFU module not discovered on this device.' });
+      setFwInfoState({ loading: false, info: null, error: `DFU module not discovered for target=${target}.` });
       return;
     }
     try {
-      const info = await dfuFwinfo(WebHIDService, dfuMod.id, dfuMod.options.fwinfo ?? 5);
+      const info = await dfuFwinfo(WebHIDService, dfuMod.id, dfuMod.options.fwinfo ?? 5, dfuMod.recipient);
       if (!info) {
         setFwInfoState({ loading: false, info: null, error: 'fwinfo fetch returned no data.' });
         return;
@@ -59,7 +81,7 @@ export const FirmwareView = ({ onProtocolError, onUpdatingChange }) => {
     } catch (e) {
       setFwInfoState({ loading: false, info: null, error: e.message });
     }
-  }, []);
+  }, [target]);
 
   useEffect(() => { loadFwInfo(); }, [loadFwInfo]);
 
@@ -105,11 +127,25 @@ export const FirmwareView = ({ onProtocolError, onUpdatingChange }) => {
       setImageState({ file: null, bytes: null, slotName: null, error: 'zip package is not valid.' });
       return;
     }
-    const { imageBytes, slotBinName, targetSlot, semver } = parsed;
-    if (imageBytes.byteLength > SLOT_MAX_BYTES) {
+    const { imageBytes, slotBinName, targetSlot, semver, manifestJson } = parsed;
+    const slotMax = SLOT_MAX_BYTES_BY_TARGET[target] ?? SLOT_MAX_BYTES_BY_TARGET.mouse;
+    if (imageBytes.byteLength > slotMax) {
       setImageState({
         file: null, bytes: null, slotName: null,
-        error: `Image is ${formatBytes(imageBytes.byteLength)} — exceeds slot capacity ${formatBytes(SLOT_MAX_BYTES)}.`,
+        error: `Image is ${formatBytes(imageBytes.byteLength)} — exceeds ${target} slot capacity ${formatBytes(slotMax)}.`,
+      });
+      return;
+    }
+    // Sanity-check the manifest's board against the connected target so a
+    // user who drops a mouse zip while connected via dongle (or vice versa)
+    // sees a clear error before kicking off a multi-minute transfer.
+    const expectedBoard = EXPECTED_BOARD_BY_TARGET[target];
+    const manifestBoard = manifestJson?.files?.[0]?.board ?? '';
+    const boardMatches = manifestBoard.startsWith(expectedBoard);
+    if (!boardMatches) {
+      setImageState({
+        file: null, bytes: null, slotName: null,
+        error: `This zip targets board "${manifestBoard || 'unknown'}" but you're connected via ${target}. Pick a zip built for the ${target} target.`,
       });
       return;
     }
@@ -119,21 +155,30 @@ export const FirmwareView = ({ onProtocolError, onUpdatingChange }) => {
   };
 
   const onStart = async () => {
-    const dfuMod = WebHIDService.findDfuModule?.();
+    const dfuMod = WebHIDService.findDfuModule?.(target);
     if (!imageState.bytes || !dfuMod) return;
     abortRef.current = new AbortController();
     const startedAt = Date.now();
     setTransfer({ running: true, bytesSent: 0, total: imageState.bytes.byteLength, phase: 'preparing', startedAt, error: null, ok: false });
 
-    const result = await dfuTransfer(WebHIDService, dfuMod, imageState.bytes, {
-      signal: abortRef.current.signal,
-      onProgress: (sent, total) => {
-        setTransfer((t) => ({ ...t, bytesSent: sent, total }));
-      },
-      onPhase: (phase) => {
-        setTransfer((t) => ({ ...t, phase }));
-      },
-    });
+    // dfuTransfer's exchanges re-throw on a send failure (e.g. the dongle/bridge
+    // dropping the handle mid-transfer -- common in wireless). Without this
+    // try/catch a throw escapes here and leaves transfer.running stuck true,
+    // which permanently disables the Choose file + Start buttons until reload.
+    let result;
+    try {
+      result = await dfuTransfer(WebHIDService, dfuMod, imageState.bytes, {
+        signal: abortRef.current.signal,
+        onProgress: (sent, total) => {
+          setTransfer((t) => ({ ...t, bytesSent: sent, total }));
+        },
+        onPhase: (phase) => {
+          setTransfer((t) => ({ ...t, phase }));
+        },
+      });
+    } catch (e) {
+      result = { ok: false, error: e?.message ? `transfer failed: ${e.message}` : 'transfer failed (device disconnected?)' };
+    }
 
     if (result.ok) {
       setTransfer((t) => ({ ...t, running: false, phase: 'rebooting', ok: true, error: null }));
@@ -232,7 +277,9 @@ export const FirmwareView = ({ onProtocolError, onUpdatingChange }) => {
     <div className="absolute inset-0 overflow-y-auto space-y-6 p-4 animate-[slideInRight_0.3s]">
       <section className="bg-panelDark border border-borderDark rounded-lg p-4 space-y-3">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Current firmware</h2>
+          <h2 className="text-lg font-semibold">
+            Current firmware <span className="text-xs text-gray-500 font-normal">— target: {target}</span>
+          </h2>
           <button
             className="text-xs text-statusInfo hover:underline"
             onClick={loadFwInfo}
@@ -270,7 +317,9 @@ export const FirmwareView = ({ onProtocolError, onUpdatingChange }) => {
       <section className="bg-panelDark border border-borderDark rounded-lg p-4 space-y-3">
         <h2 className="text-lg font-semibold">Update</h2>
         <p className="text-xs text-gray-400">
-          The transfer typically runs 5–10 minutes over the wired USB cable. Do not unplug. The mouse will reboot automatically when it finishes.
+          {target === 'dongle'
+            ? 'The transfer typically runs ~30 seconds over the USB SPI bridge. Do not unplug. The dongle will reboot automatically when it finishes — please unplug and replug the dongle once the page reloads.'
+            : 'The transfer typically runs 5–10 minutes over the wired USB cable. Do not unplug. The mouse will reboot automatically when it finishes.'}
         </p>
         <div className="flex gap-2">
           <button
